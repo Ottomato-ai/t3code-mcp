@@ -14,7 +14,7 @@ export interface ServerRuntime {
 export interface ModelSelection {
   instanceId: string;
   model: string;
-  options?: Record<string, unknown>;
+  options?: Array<{ id: string; value: unknown }> | Record<string, unknown>;
 }
 
 export type TurnState = "running" | "interrupted" | "completed" | "error";

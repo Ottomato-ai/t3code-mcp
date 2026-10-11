@@ -150,6 +150,10 @@ export function registerPhase2(server: McpServer, getClient: () => T3Client) {
           .optional()
           .describe("Provider instance id, e.g. claude, codex, cursor, grok, opencode"),
         model: z.string().optional().describe("Model name for the provider, e.g. gpt-5.4"),
+        effort: z
+          .enum(["low", "medium", "high", "xhigh", "max"])
+          .optional()
+          .describe("Reasoning effort for the new thread (default high when provider and model are given; never max unless asked)"),
         runtimeMode: z
           .enum(["approval-required", "auto-accept-edits", "auto", "full-access"])
           .optional()
@@ -169,7 +173,11 @@ export function registerPhase2(server: McpServer, getClient: () => T3Client) {
         }
         let modelSelection =
           args.provider && args.model
-            ? { instanceId: args.provider, model: args.model }
+            ? {
+                instanceId: args.provider,
+                model: args.model,
+                options: [{ id: "effort", value: args.effort ?? "high" }],
+              }
             : (project.defaultModelSelection ?? null);
         if (!modelSelection) {
           const recent = shell.threads
