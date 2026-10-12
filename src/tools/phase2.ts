@@ -6,6 +6,7 @@ import type { ModelSelection, ThreadShell } from "../model.js";
 import { errorResult, jsonResult, messageRow, relTime, truncate } from "../format.js";
 import type { LaunchDesk } from "../desk/desk.js";
 import { runningThreadIds } from "../desk/running.js";
+import { queuedResult } from "./desk.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -231,6 +232,7 @@ export function registerPhase2(
         const admission = desk.admit(
           {
             lane: args.lane,
+            projectId: project.id,
             project: project.title,
             task: title,
             ned: args.ned_requested === true,
@@ -238,24 +240,13 @@ export function registerPhase2(
           },
           runningThreadIds(shell),
         );
-        if (admission.kind === "queued") {
-          return jsonResult({
-            queued: true,
-            queue_entry: admission.entry.id,
-            position: admission.position,
-            running: admission.running,
-            cap: admission.cap,
-            memory: { status: admission.memory.status, commitPercent: admission.memory.commitPercent },
-            note:
-              "Not launched: the launch cap is reached, host memory is high, or lanes wait ahead. " +
-              "Do not retry in a loop. Call launch_wait with this queue_entry (or check back on your " +
-              "watcher), then call create_thread again with the same lane and queue_entry once granted.",
-          });
-        }
+        if (admission.kind === "queued") return queuedResult(admission, "create_thread");
 
         const threadId = newId();
         let result: { sequence: number };
+        let createSent = false;
         try {
+          createSent = true;
           // The HTTP dispatch path has no bootstrap expansion (that lives in the
           // WS handler), so create the thread and start the turn as two commands.
           await client.dispatch({
@@ -281,10 +272,10 @@ export function registerPhase2(
             createdAt: nowIso(),
           });
         } catch (e) {
-          desk.launchFailed(admission.entry.id, args.queue_entry !== undefined);
+          desk.launchFailed(admission.entry.id, admission.claim, { createSent, threadId });
           throw e;
         }
-        desk.markLaunched(admission.entry.id, threadId);
+        desk.markLaunched(admission.entry.id, admission.claim, threadId);
         return jsonResult({
           created: true,
           threadId,

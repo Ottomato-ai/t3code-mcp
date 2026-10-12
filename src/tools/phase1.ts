@@ -11,6 +11,9 @@ import {
   relTime,
   threadRow,
 } from "../format.js";
+import type { LaunchDesk } from "../desk/desk.js";
+import { LIVE_SESSION_STATES, runningThreadIds } from "../desk/running.js";
+import { queuedResult } from "./desk.js";
 
 const ATTENTION_VALUES = [
   "needs-approval",
@@ -22,7 +25,11 @@ const ATTENTION_VALUES = [
   "idle",
 ] as const;
 
-export function registerPhase1(server: McpServer, getClient: () => T3Client) {
+export function registerPhase1(
+  server: McpServer,
+  getClient: () => T3Client,
+  getDesk: () => LaunchDesk,
+) {
   server.registerTool(
     "t3_status",
     {
@@ -222,7 +229,9 @@ export function registerPhase1(server: McpServer, getClient: () => T3Client) {
         "Send a user message to an existing thread and start an agent turn. Reuses the thread's " +
         "current model, runtime mode, and interaction mode unless overridden. If the agent is " +
         "mid-turn the message is queued by T3. Returns immediately; use wait_for_turn or " +
-        "get_thread to see the reply.",
+        "get_thread to see the reply. A message to a thread whose session is not live (stopped, " +
+        "error, none) restarts the agent and goes through the launch desk like create_thread: it " +
+        "needs lane and may answer queued (then call launch_wait and send again with queue_entry).",
       inputSchema: {
         threadId: z.string().describe("Thread id (from list_threads)"),
         message: z.string().min(1).describe("The message text to send"),
@@ -231,6 +240,16 @@ export function registerPhase1(server: McpServer, getClient: () => T3Client) {
           .optional()
           .describe("Override permission mode for this turn onward"),
         interactionMode: z.enum(["default", "plan"]).optional(),
+        lane: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Your exact session title; required when the thread's session is not live (the send restarts it)"),
+        queue_entry: z.string().optional().describe("Entry id from an earlier queued answer, once launch_wait says granted"),
+        ned_requested: z
+          .boolean()
+          .optional()
+          .describe("True only when Ned asked for this restart himself in your session (goes first; logged)"),
       },
     },
     async (args) => {
@@ -238,6 +257,36 @@ export function registerPhase1(server: McpServer, getClient: () => T3Client) {
         const client = getClient();
         const snap = await client.thread(args.threadId, { turnLimit: 1 });
         const t = snap.thread;
+        const live = LIVE_SESSION_STATES.includes(t.session?.status ?? "");
+        let gate: { desk: LaunchDesk; id: string; claim: string } | undefined;
+        if (!live) {
+          if (!args.lane) {
+            return errorResult(
+              new Error(
+                `Thread ${t.id} has no live session (${t.session?.status ?? "none"}); this message would restart it, ` +
+                  "which counts against the T3 launch cap. Pass lane (your exact session title).",
+              ),
+            );
+          }
+          const shell = await client.shell();
+          const project = shell.projects.find((p) => p.id === t.projectId);
+          const desk = getDesk();
+          const admission = desk.admit(
+            {
+              lane: args.lane,
+              projectId: t.projectId,
+              project: project?.title ?? t.projectId,
+              task: t.title ?? t.id,
+              ned: args.ned_requested === true,
+              queueEntry: args.queue_entry,
+              kind: "resume",
+              targetThreadId: t.id,
+            },
+            runningThreadIds(shell),
+          );
+          if (admission.kind === "queued") return queuedResult(admission, "send_message");
+          gate = { desk, id: admission.entry.id, claim: admission.claim };
+        }
         const command = {
           type: "thread.turn.start",
           commandId: newId(),
@@ -247,12 +296,20 @@ export function registerPhase1(server: McpServer, getClient: () => T3Client) {
           interactionMode: args.interactionMode ?? t.interactionMode ?? "default",
           createdAt: nowIso(),
         };
-        const result = await client.dispatch(command);
+        let result: { sequence: number };
+        try {
+          result = await client.dispatch(command);
+        } catch (e) {
+          gate?.desk.launchFailed(gate.id, gate.claim, { createSent: true, threadId: t.id });
+          throw e;
+        }
+        gate?.desk.markLaunched(gate.id, gate.claim, t.id);
         return jsonResult({
           sent: true,
           threadId: t.id,
           threadTitle: t.title,
           sequence: result.sequence,
+          ...(gate ? { queue_entry: gate.id, restarted: true } : {}),
           wasBusy: t.session?.activeTurnId ? true : false,
           note: "Turn started. Use wait_for_turn or get_thread to read the reply.",
         });

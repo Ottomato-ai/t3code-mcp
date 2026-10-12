@@ -21,7 +21,7 @@ export function createServer(): McpServer {
   // Lazy so the MCP server starts (and t3_status can explain) even when T3 is down.
   let client: T3Client | undefined;
   const getClient = () => (client ??= makeClient());
-  registerPhase1(server, getClient);
+  registerPhase1(server, getClient, getDesk);
   registerPhase2(server, getClient, getDesk);
   registerPhase3(server, getClient);
   registerLaunchDesk(server, getClient, getDesk);
