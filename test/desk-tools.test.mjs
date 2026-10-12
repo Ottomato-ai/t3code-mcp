@@ -2,7 +2,7 @@
 // launch_queue, launch_cancel, launch_queue_move. In-memory MCP client, fake T3 client.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -683,4 +683,81 @@ test("fromEnv: T3_LAUNCH_CAP, T3_LAUNCH_GRANT_MINUTES and T3_LAUNCH_DESK_DIR", (
     assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_CAP: bad, LOCALAPPDATA: "C:\\L" }).cap, 15, `cap ${JSON.stringify(bad)}`);
   }
   assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_CAP: "0", LOCALAPPDATA: "C:\\L" }).cap, 0);
+});
+
+// ---------- events for Host Guard (F-44) ----------
+
+const eventLines = (dir) =>
+  readFileSync(join(dir, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+
+test("a create_thread launch logs one launched event with exactly the agreed fields", async (t) => {
+  const { call, dir } = await setup(t, { cap: 2 });
+  const r = await call("create_thread", create("Lane A"));
+  const launched = eventLines(dir).filter((e) => e.type === "launched");
+  assert.equal(launched.length, 1);
+  const e = launched[0];
+  assert.deepEqual(Object.keys(e).sort(), ["at", "id", "kind", "lane", "launched_at", "project", "thread_id", "type"]);
+  assert.equal(e.id, r.queue_entry);
+  assert.equal(e.lane, "Lane A");
+  assert.equal(e.project, "Scratch");
+  assert.equal(e.thread_id, r.threadId);
+  assert.equal(e.kind, "create");
+  assert.equal(e.launched_at, new Date(T0).toISOString());
+  assert.ok(Date.parse(e.at) > 0);
+});
+
+test("a gated send_message restart logs a launched event of kind resume", async (t) => {
+  const { call, dir } = await setup(t, { cap: 2 });
+  const r = await call("send_message", { threadId: "th9", message: "wake up", lane: "Lane B" });
+  const launched = eventLines(dir).filter((e) => e.type === "launched");
+  assert.equal(launched.length, 1);
+  assert.equal(launched[0].id, r.queue_entry);
+  assert.equal(launched[0].lane, "Lane B");
+  assert.equal(launched[0].thread_id, "th9");
+  assert.equal(launched[0].kind, "resume");
+});
+
+test("a granted entry launched with queue_entry logs launched once", async (t) => {
+  const s = await setup(t, { cap: 1 });
+  const id = await grantedEntry(s);
+  const r = await s.call("create_thread", create("Lane A", { queue_entry: id }));
+  const launched = eventLines(s.dir).filter((e) => e.type === "launched");
+  assert.equal(launched.length, 1);
+  assert.equal(launched[0].id, id);
+  assert.equal(launched[0].thread_id, r.threadId);
+});
+
+test("no launched event for an ungated message, a queued request or a failed launch", async (t) => {
+  const { call, t3, dir } = await setup(t, { cap: 1, running: ["th1"] });
+  await call("send_message", { threadId: "th1", message: "go on" }); // running: not gated
+  await call("create_thread", create("Lane Q")); // queued at the cap
+  t3.state.running = [];
+  t3.dispatch = async () => { throw new Error("T3 down"); };
+  await call("send_message", { threadId: "th9", message: "x", lane: "Lane F" }); // fails
+  const types = existsSync(join(dir, "events.jsonl")) ? eventLines(dir).map((e) => e.type) : [];
+  assert.ok(!types.includes("launched"), types.join(","));
+});
+
+test("the warning path logs launch_warning with exactly id and thread_id, and no launched event", async (t) => {
+  const { call, desk, dir } = await setup(t, { cap: 2 });
+  desk.markLaunched = () => { throw new Error("desk.json locked"); };
+  const r = await call("create_thread", create("Lane A"));
+  assert.match(r.warning, /do not retry/i);
+  const evs = eventLines(dir);
+  const warnings = evs.filter((e) => e.type === "launch_warning");
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(Object.keys(warnings[0]).sort(), ["at", "id", "thread_id", "type"]);
+  assert.equal(warnings[0].id, r.queue_entry);
+  assert.equal(warnings[0].thread_id, r.threadId);
+  assert.equal(evs.filter((e) => e.type === "launched").length, 0);
+});
+
+test("the warning path on a restart logs launch_warning for that thread", async (t) => {
+  const { call, desk, dir } = await setup(t, { cap: 2 });
+  desk.markLaunched = () => { throw new Error("desk.json locked"); };
+  const r = await call("send_message", { threadId: "th9", message: "wake up", lane: "Lane A" });
+  const w = eventLines(dir).filter((e) => e.type === "launch_warning");
+  assert.equal(w.length, 1);
+  assert.equal(w[0].id, r.queue_entry);
+  assert.equal(w[0].thread_id, "th9");
 });
