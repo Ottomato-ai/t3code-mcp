@@ -156,3 +156,17 @@ test("cap: a configured floor above 15 is kept (T3_LAUNCH_CAP)", () => {
   assert.equal(decideCap({ floor: 18, reading: ok({ allowedExtra: 0 }), lastExtraAt: null }).effective, 18);
   assert.equal(decideCap({ floor: 18, reading: ok({ status: "stale" }), lastExtraAt: null }).effective, 18);
 });
+
+test("reader: allowedExtra is floored and never negative; a non-object record is unreadable; stale has a detail", (t) => {
+  const dir = tempDir(t);
+  assert.equal(readHeadroom({ file: write(dir, record({ allowedExtra: 2.7 })), nowMs: T0 }).allowedExtra, 2);
+  assert.equal(readHeadroom({ file: write(dir, record({ allowedExtra: -3 })), nowMs: T0 }).allowedExtra, 0);
+  assert.equal(readHeadroom({ file: write(dir, "5"), nowMs: T0 }).status, "unreadable");
+  const stale = readHeadroom({ file: write(dir, record()), nowMs: T0 + 121_000 });
+  assert.match(stale.detail, /121 s old/);
+  assert.equal(readHeadroom({ file: write(dir, record()), nowMs: T0 }).detail, null);
+});
+
+test("cap: a configured floor above 20 is kept", () => {
+  assert.equal(decideCap({ floor: 25, reading: ok({ allowedExtra: 3, hardCap: 99 }), lastExtraAt: null }).effective, 25);
+});

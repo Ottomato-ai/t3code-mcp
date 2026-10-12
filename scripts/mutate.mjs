@@ -14,12 +14,13 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUT = process.argv[2];
 const FILTER = process.argv[3];
 const HB = join(process.env.USERPROFILE || process.env.HOME || ".", ".host-guard", "heartbeat.json");
-const TESTS = ["test/store.test.mjs", "test/memory.test.mjs", "test/desk-tools.test.mjs", "test/client.test.mjs"];
+const TESTS = ["test/store.test.mjs", "test/memory.test.mjs", "test/desk-tools.test.mjs", "test/client.test.mjs", "test/headroom.test.mjs"];
 
 const S = "dist/desk/store.js", D = "dist/desk/desk.js", M = "dist/desk/memory.js", R = "dist/desk/running.js";
 const T = "dist/tools/desk.js", P1 = "dist/tools/phase1.js", P2 = "dist/tools/phase2.js";
 const U = "dist/desk/untrusted.js";
 const C = "dist/client.js";
+const H = "dist/desk/headroom.js";
 
 // [file, exact text (must occur once), replacement, label]
 export const MUTANTS = [
@@ -258,6 +259,67 @@ export const MUTANTS = [
   [T, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });`, `        desk.store.logEvent({ type: "launch_warning", thread_id: threadId });`, "F44 warning id"],
   [T, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });`, `        desk.store.logEvent({ type: "launch_warning", id });`, "F44 warning thread_id"],
   [T, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });`, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId, extra: 1 });`, "F44 warning exact fields"],
+  // F-45: phase 2 extra slots from Host Guard headroom
+  [H, `export const HARD_CAP_MAX = 20;`, `export const HARD_CAP_MAX = 21;`, "F45 hard cap 20"],
+  [H, `export const DEFAULT_STALE_AFTER_S = 120;`, `export const DEFAULT_STALE_AFTER_S = 121;`, "F45 default stale 120 s"],
+  [H, `    const home = env.HOST_GUARD_HOME || join(profile, ".host-guard");`, `    const home = join(profile, ".host-guard");`, "F45 HOST_GUARD_HOME"],
+  [H, `    const profile = env.USERPROFILE || env.HOME || ".";`, `    const profile = env.HOME || ".";`, "F45 USERPROFILE"],
+  [H, `const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);`, `const num = (v) => (Number.isFinite(Number(v)) && v !== null ? Number(v) : null);`, "F45 numbers only"],
+  [H, `        if (!rec || typeof rec !== "object")`, `        if (!rec)`, "F45 record is an object"],
+  [H, `    if (rec.schema !== HEADROOM_SCHEMA)\n        return none("schema"`, `    if (false)\n        return none("schema"`, "F45 schema checked"],
+  [H, `    if (!Number.isFinite(at))\n        return none("unreadable"`, `    if (false)\n        return none("unreadable"`, "F45 time checked"],
+  [H, `(staleS !== null && staleS > 0 ? staleS : DEFAULT_STALE_AFTER_S)`, `(staleS ?? DEFAULT_STALE_AFTER_S)`, "F45 stale default for bad values"],
+  [H, `        status: nowMs - at > staleMs ? "stale" : "ok",`, `        status: nowMs - at >= staleMs ? "stale" : "ok",`, "F45 stale bound"],
+  [H, `        baseCap: num(rec.baseCap),`, `        baseCap: rec.baseCap ?? null,`, "F45 baseCap number"],
+  [H, `        hardCap: num(rec.hardCap),`, `        hardCap: 20,`, "F45 hardCap read"],
+  [H, `        allowedExtra: allowed !== null && allowed > 0 ? Math.floor(allowed) : 0,`, `        allowedExtra: allowed ?? 0,`, "F45 reader floors allowedExtra"],
+  [H, `        measuring: typeof rec.measuring === "string" ? rec.measuring : null,`, `        measuring: rec.measuring ?? null,`, "F45 measuring string"],
+  [H, `    if (reading.status === "stale")\n        reading.detail`, `    if (false)\n        reading.detail`, "F45 stale detail"],
+  [H, `    const ceiling = Math.max(HARD_CAP_MAX, floor);`, `    const ceiling = HARD_CAP_MAX;`, "F45 floor above 20 kept"],
+  [H, `    const clamp = (n) => Math.min(Math.max(n, floor), ceiling);`, `    const clamp = (n) => Math.min(n, ceiling);`, "F45 never below floor"],
+  [H, `    const clamp = (n) => Math.min(Math.max(n, floor), ceiling);`, `    const clamp = (n) => Math.max(n, floor);`, "F45 never above ceiling"],
+  [H, `    if (reading.status !== "ok")\n        return flat(floor, reading.status);`, ``, "F45 not ok means floor"],
+  [H, `    const base = clamp(reading.baseCap ?? floor);`, `    const base = floor;`, "F45 base from file"],
+  [H, `    if (reading.measuring !== null)\n        return flat(base, "measuring");`, ``, "F45 measuring means no extra"],
+  [H, `    if (input.lastExtraAt !== null && !(reading.at !== null && reading.at > input.lastExtraAt)) {`, `    if (false) {`, "F45 pending measurement"],
+  [H, `reading.at > input.lastExtraAt)) {`, `reading.at >= input.lastExtraAt)) {`, "F45 newer record needed"],
+  [H, `    const allowed = Math.max(0, Math.floor(reading.allowedExtra));`, `    const allowed = reading.allowedExtra;`, "F45 decision floors allowedExtra"],
+  [H, `Math.min(base + allowed, reading.hardCap ?? ceiling)`, `(base + allowed)`, "F45 hardCap limits"],
+  [H, `{ effective, base, extra, reason: "extra", extraGrants: 1 }`, `{ effective, base, extra, reason: "extra", extraGrants: 2 }`, "F45 one extra at a time"],
+  [S, `        const isExtra = ctx.baseCap !== undefined && used >= ctx.baseCap;`, `        const isExtra = ctx.baseCap !== undefined && used > ctx.baseCap;`, "F45 extra bound"],
+  [S, `        const isExtra = ctx.baseCap !== undefined && used >= ctx.baseCap;`, `        const isExtra = false;`, "F45 extra detected"],
+  [S, `        if (isExtra && extraGiven >= (ctx.extraGrants ?? 0))\n            break;`, ``, "F45 extra grants limited"],
+  [S, `(ctx.extraGrants ?? 0)`, `(ctx.extraGrants ?? 1)`, "F45 extra grants default 0"],
+  [S, `            e.extra = true;`, ``, "F45 extra flagged"],
+  [S, `            state.last_extra_at = iso(ctx.nowMs);`, ``, "F45 extra grant timed"],
+  [S, `            extraGiven++;`, ``, "F45 extra counted"],
+  [S, `    if (e.extra)\n        state.last_extra_at = e.launched_at;`, `    if (true)\n        state.last_extra_at = e.launched_at;`, "F45 only extra launches timed"],
+  [S, `    if (e.extra)\n        state.last_extra_at = e.launched_at;`, ``, "F45 extra launch timed"],
+  [S, `(x.extra === undefined || typeof x.extra === "boolean")`, `true`, "F45 valid extra"],
+  [S, `(s.last_extra_at === undefined || s.last_extra_at === null || isTime(s.last_extra_at))`, `true`, "F45 valid last_extra_at"],
+  [S, `(s.cap_effective === undefined || s.cap_effective === null || Number.isFinite(s.cap_effective))`, `true`, "F45 valid cap_effective"],
+  [D, `            readHeadroom: () => readHeadroom({ file: headroomFile }),`, ``, "F45 fromEnv reads headroom"],
+  [D, `        if (!reading)\n            return { effective: this.cap, base: this.cap, extra: 0, reason: "config", extraGrants: 0 };`, `        if (!reading)\n            return { effective: this.cap, base: this.cap, extra: 0, reason: "base", extraGrants: 0 };`, "F45 config reason"],
+  [D, `        const last = state.last_extra_at ? Date.parse(state.last_extra_at) : null;`, `        const last = null;`, "F45 last extra used"],
+  [D, `        ctx.cap = decision.effective;`, ``, "F45 effective cap applied"],
+  [D, `            ctx.baseCap = decision.base;`, ``, "F45 base cap applied"],
+  [D, `            ctx.extraGrants = decision.extraGrants;`, ``, "F45 extra grants applied"],
+  [D, `        const changed = state.cap_effective !== decision.effective;`, `        const changed = true;`, "F45 cap logged on change only"],
+  [D, `        state.cap_effective = decision.effective;`, ``, "F45 cap remembered"],
+  [D, `        if (!cap.changed)\n            return;`, ``, "F45 unchanged cap not logged"],
+  [D, `extra: d.extra, reason: d.reason });`, `extra: d.extra });`, "F45 cap event fields"],
+  [D, `            cap = this.applyCap(state, ctx, reading);\n            if (req.queueEntry) {`, `            if (req.queueEntry) {`, "F45 admit applies cap"],
+  [D, `        this.logCap(cap);\n        if (req.ned`, `        if (req.ned`, "F45 admit logs cap"],
+  [D, `            cap: cap.decision.effective,`, `            cap: this.cap,`, "F45 queued shows effective cap"],
+  [D, `            cap = this.applyCap(state, ctx, reading);\n            return recompute(state, ctx);`, `            return recompute(state, ctx);`, "F45 tick applies cap"],
+  [D, `        if (cap)\n            this.logCap(cap);`, ``, "F45 tick logs cap"],
+  [D, `            cap: decision.effective,\n            capDecision`, `            cap: this.cap,\n            capDecision`, "F45 view effective cap"],
+  [D, `            free: Math.max(0, decision.effective - used),`, `            free: Math.max(0, this.cap - used),`, "F45 view free"],
+  [T, `                cap_base: v.capDecision.base,`, ``, "F45 queue cap_base"],
+  [T, `                cap_extra: v.capDecision.extra,`, ``, "F45 queue cap_extra"],
+  [T, `                cap_reason: v.capDecision.reason,`, ``, "F45 queue cap_reason"],
+  [T, `                        at: v.headroom.at === null ? null : new Date(v.headroom.at).toISOString(),`, `                        at: v.headroom.at,`, "F45 queue headroom at"],
+  [T, `                        allowed_extra: v.headroom.allowedExtra,`, ``, "F45 queue headroom allowed_extra"],
 ];
 
 function commit() {

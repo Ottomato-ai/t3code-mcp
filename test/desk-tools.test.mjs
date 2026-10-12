@@ -2,7 +2,7 @@
 // launch_queue, launch_cancel, launch_queue_move. In-memory MCP client, fake T3 client.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -878,4 +878,33 @@ test("launch_queue does not log a cap event (read-only)", async (t) => {
 test("fromEnv reads headroom.json from HOST_GUARD_HOME", (t) => {
   const d = LaunchDesk.fromEnv({ HOST_GUARD_HOME: "X:\hg", LOCALAPPDATA: "C:\L" });
   assert.equal(d.headroomFile, join("X:\hg", "headroom.json"));
+});
+
+test("fromEnv reads the real headroom file and uses it for the cap", (t) => {
+  const dir = tempDir(t);
+  writeFileSync(
+    join(dir, "headroom.json"),
+    JSON.stringify({ schema: "hostguard.headroom/v1", at: new Date().toISOString(), staleAfterSeconds: 120, baseCap: 15, hardCap: 20, allowedExtra: 3, measuring: null }),
+  );
+  const d = LaunchDesk.fromEnv({ HOST_GUARD_HOME: dir, T3_LAUNCH_DESK_DIR: join(dir, "desk") });
+  const v = d.view([]);
+  assert.equal(v.cap, 18);
+  assert.equal(v.capDecision.reason, "extra");
+});
+
+test("a cap change seen by the tick is logged, and the tick grants the extra", async (t) => {
+  const s = await setup(t, { cap: 15, running: fifteen(), headroom: room({ allowedExtra: 0 }) });
+  const a = await s.call("create_thread", create("Lane A"));
+  assert.equal(a.queued, true);
+  s.headroom.allowedExtra = 3;
+  await s.desk.tickOnce(s.t3);
+  assert.equal(s.entry(a.queue_entry).state, "granted");
+  const caps = capEvents(s.dir);
+  assert.deepEqual(caps.map((c) => [c.effective, c.reason]), [[15, "base"], [18, "extra"]]);
+});
+
+test("launch_queue free uses the effective cap", async (t) => {
+  const { call } = await setup(t, { cap: 15, running: ["x"], headroom: room({ allowedExtra: 3 }) });
+  const q = await call("launch_queue", {});
+  assert.equal(q.free, 17);
 });

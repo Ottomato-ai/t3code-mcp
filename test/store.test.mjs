@@ -828,3 +828,9 @@ test("validState: phase 2 fields are optional and typed", () => {
   assert.equal(bad((s) => (s.entries[0].extra = "yes")), false);
   assert.equal(bad((s) => { s.last_extra_at = null; s.cap_effective = null; }), true);
 });
+
+test("extra grants: baseCap without extraGrants allows no extra", () => {
+  const st = S.emptyState();
+  add(st, "A");
+  assert.equal(S.recompute(st, ctx({ cap: 5, baseCap: 0 })).granted.length, 0);
+});
