@@ -119,6 +119,7 @@ try {
         "This is an automated smoke test of an external control surface. Reply with exactly: SMOKE-OK. Do not run any tools or commands.",
       title: "t3code-mcp smoke test (disposable)",
       runtimeMode: "approval-required",
+      lane: process.env.T3_SMOKE_LANE ?? "t3code-mcp smoke",
     });
     ok("create_thread", created.created === true, `${created.threadId} on ${created.model}`);
 

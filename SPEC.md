@@ -73,7 +73,7 @@ Infrastructure in this phase: origin discovery, token loading (`T3_TOKEN` env or
 | `pending_actions` | — | Cross-thread digest of everything blocked on the human: approvals (with command/file detail), questions (with options), actionable plans, errored sessions. The voice "inbox". |
 | `respond_to_approval` | `threadId`, `requestId`, `decision` | `thread.approval.respond`; decision `accept/acceptForSession/decline/cancel`. |
 | `respond_to_user_input` | `threadId`, `requestId`, `answers` | `thread.user-input.respond`; answers keyed by question id. |
-| `create_thread` | `projectId`, `message`, `title?`, `provider?`, `model?`, `runtimeMode?`, `interactionMode?` | Two dispatches: `thread.create` then `thread.turn.start` (the `bootstrap` expansion is WS-only server-side, so the HTTP path must do the two-step itself). Model defaults to the project's `defaultModelSelection`, then the project's most recent thread's model. Threads run in the project workspace — worktree preparation is a WS-only service, so worktree threads must be started from the T3 UI. |
+| `create_thread` | `projectId`, `message`, `lane`, `queue_entry?`, `ned_requested?`, `title?`, `provider?`, `model?`, `effort?`, `runtimeMode?`, `interactionMode?` | Gated by the launch desk (see Launch desk below): launches only when a slot is free and nobody waits ahead, else answers `queued`. Effort defaults to `high`; `max` needs `ned_requested`. Two dispatches: `thread.create` then `thread.turn.start` (the `bootstrap` expansion is WS-only server-side, so the HTTP path must do the two-step itself). Model defaults to the project's `defaultModelSelection`, then the project's most recent thread's model. Threads run in the project workspace — worktree preparation is a WS-only service, so worktree threads must be started from the T3 UI. |
 | `interrupt_thread` | `threadId` | `thread.turn.interrupt` on the active turn. |
 | `stop_thread` | `threadId` | `thread.session.stop` (shuts down the provider process; thread stays). |
 | `wait_for_turn` | `threadId`, `timeoutSeconds?` (default 120, max 300) | Poll until the latest turn leaves `running` **or** the thread starts waiting on approval/input; return final assistant text or what's being asked. Turns "send and check back" into one voice round-trip. |
@@ -90,6 +90,19 @@ Infrastructure in this phase: origin discovery, token loading (`T3_TOKEN` env or
 | `wait_for_change` | `timeoutSeconds?` (default 60, max 300) | Long-poll the shell snapshot; return when any thread changes attention state (turn completes, approval appears…). Enables a voice loop that stays quiet until something happens. |
 
 Plus **remote transport**: `--http --port <p>` runs the MCP server as streamable HTTP with its own bearer auth (`MCP_HTTP_TOKEN`), bound to 127.0.0.1 by default, so Hermes or any remote voice agent can connect via Tailscale/tunnel while T3 Code itself stays localhost-only.
+
+### Launch desk (cap and queue)
+
+Design: `Infra/docs/superpowers/specs/2026-10-12-t3-launch-queue-design.md`. At most `T3_LAUNCH_CAP` (default 15) live T3 threads (session `running`, `ready` or `starting`, not archived) across all lanes; the count is read from `GET /api/orchestration/shell` at decision time.
+
+| Tool | Params | Behavior |
+|---|---|---|
+| `launch_wait` | `queue_entry`, `timeout_seconds?` (default 120, max 300) | Poll (re-granting with a fresh running count) until the entry is granted, expires or is cancelled, or the timeout passes. Returns state and position. |
+| `launch_queue` | — | Read-only: running, cap, free, host memory, live grants, waiting list (position, lane, project, task, priority, age). Agent text wrapped in `<untrusted-data>`. |
+| `launch_cancel` | `queue_entry`, `lane` | Cancel your own waiting or granted entry. |
+| `launch_queue_move` | `queue_entry`, `before`, `lane` | Move a waiting entry before another (takes its priority class). Only lane `(Resume) ** OttoContext`; logged. |
+
+Rules: Ned entries first, then first come, first served; positions dense. A grant needs (running + live grants + launches from the last 2 minutes that T3 does not show yet) < cap and host-guard commit < 90% (from `heartbeat.json`; unreadable or older than 2 minutes does not block, logged). A grant holds its slot 10 minutes (`T3_LAUNCH_GRANT_MINUTES`), then expires and the next entry is granted. Waiting entries expire after 24 hours. The last 200 entries are kept. Each server process re-grants every 30 seconds. State: `%LOCALAPPDATA%\OttoSystems\launch-desk\desk.json` (owner-only folder; `T3_LAUNCH_DESK_DIR`), whole-file writes under a lock file; audit log `events.jsonl`.
 
 Explicit non-goals for now: file/terminal/preview control (T3 exposes these over WS RPC only), turn diffs, checkpoint revert (destructive; revisit with confirmation semantics), multi-environment fan-out (one T3 server per MCP instance; run several instances if needed).
 

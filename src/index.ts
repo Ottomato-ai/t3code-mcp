@@ -6,9 +6,15 @@ import { loadHttpToken } from "./config.js";
 import { registerPhase1 } from "./tools/phase1.js";
 import { registerPhase2 } from "./tools/phase2.js";
 import { registerPhase3 } from "./tools/phase3.js";
+import { registerLaunchDesk } from "./tools/desk.js";
+import { LaunchDesk } from "./desk/desk.js";
 import { startHttp } from "./http.js";
 
 const VERSION = "0.1.0";
+
+// One launch desk per process, shared by every MCP session (HTTP mode makes one server per request).
+let desk: LaunchDesk | undefined;
+const getDesk = () => (desk ??= LaunchDesk.fromEnv());
 
 export function createServer(): McpServer {
   const server = new McpServer({ name: "t3code-mcp", version: VERSION });
@@ -16,8 +22,9 @@ export function createServer(): McpServer {
   let client: T3Client | undefined;
   const getClient = () => (client ??= makeClient());
   registerPhase1(server, getClient);
-  registerPhase2(server, getClient);
+  registerPhase2(server, getClient, getDesk);
   registerPhase3(server, getClient);
+  registerLaunchDesk(server, getClient, getDesk);
   return server;
 }
 
@@ -40,10 +47,16 @@ Usage:
 Env:
   T3_TOKEN        bearer token for the T3 server (required)
   T3_ORIGIN       override T3 server origin (default: ~/.t3/userdata/server-runtime.json)
-  MCP_HTTP_TOKEN  bearer token clients must present in --http mode`,
+  MCP_HTTP_TOKEN  bearer token clients must present in --http mode
+  T3_LAUNCH_CAP   max live T3 threads across all lanes (default 15)
+  T3_LAUNCH_GRANT_MINUTES  minutes a granted launch slot is held (default 10)
+  T3_LAUNCH_DESK_DIR       launch queue folder (default %LOCALAPPDATA%/OttoSystems/launch-desk)`,
     );
     return;
   }
+  // The launch desk re-grants every 30 s inside every running server (stop_thread frees a slot).
+  let tickClient: T3Client | undefined;
+  getDesk().startTicker(() => (tickClient ??= makeClient()));
   if (args.includes("--http")) {
     const token = loadHttpToken();
     if (!token) {

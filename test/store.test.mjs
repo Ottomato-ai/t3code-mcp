@@ -21,6 +21,14 @@ test("order: Ned entries first by time, then normal entries first in, first out"
   assert.deepEqual(S.orderedWaiting(st).map((e) => e.lane), ["B", "D", "A", "C"]);
 });
 
+test("entries created in the same millisecond keep arrival order", () => {
+  for (let round = 0; round < 20; round++) {
+    const st = S.emptyState();
+    for (const lane of ["A", "B", "C", "D"]) add(st, lane, "normal", T0);
+    assert.deepEqual(S.orderedWaiting(st).map((e) => e.lane), ["A", "B", "C", "D"]);
+  }
+});
+
 test("positions are dense and 1-based; non-waiting entries have no position", () => {
   const st = S.emptyState();
   const a = add(st, "A", "normal", T0);
@@ -298,7 +306,7 @@ test("the desk folder is created owner-only (no inherited access)", { skip: proc
   const acl = execFileSync("icacls", [dir], { encoding: "utf8" });
   assert.doesNotMatch(acl, /\(I\)/, acl);
   assert.match(acl, new RegExp(process.env.USERNAME, "i"));
-  assert.doesNotMatch(acl, /Users|Everyone|Administrators/i, acl);
+  assert.doesNotMatch(acl, /BUILTIN\\Users|Everyone|BUILTIN\\Administrators|Authenticated Users/i, acl);
 });
 
 test("logEvent appends one JSON line with a timestamp", (t) => {
