@@ -345,3 +345,56 @@ test("an unreadable memory status does not block and is logged once", async (t) 
   const events = readFileSync(join(dir, "events.jsonl"), "utf8").trim().split("\n").filter((l) => l.includes("memory_unreadable"));
   assert.equal(events.length, 1);
 });
+
+test("launch_queue shows an expired grant as gone and still writes nothing", async (t) => {
+  const { call, t3, desk, clock, dir } = await setup(t, { cap: 1, running: ["x"] });
+  await call("create_thread", create("Lane A"));
+  t3.state.running = [];
+  await desk.tickOnce(t3);
+  const before = readFileSync(join(dir, "desk.json"), "utf8");
+  clock.now += 10 * 60_000;
+  const q = await call("launch_queue", {});
+  assert.equal(q.grants.length, 0);
+  assert.equal(q.free, 1);
+  assert.equal(readFileSync(join(dir, "desk.json"), "utf8"), before);
+});
+
+test("launch_queue free counts running threads and live grants", async (t) => {
+  const { call, t3, desk } = await setup(t, { cap: 3, running: ["x", "y", "z"] });
+  await call("create_thread", create("Lane A"));
+  t3.state.running = ["x"];
+  await desk.tickOnce(t3);
+  const q = await call("launch_queue", {});
+  assert.equal(q.grants.length, 1);
+  assert.equal(q.free, 1);
+});
+
+test("fromEnv: T3_LAUNCH_CAP, T3_LAUNCH_GRANT_MINUTES and T3_LAUNCH_DESK_DIR", () => {
+  const d = LaunchDesk.fromEnv({ T3_LAUNCH_CAP: "4", T3_LAUNCH_GRANT_MINUTES: "3", T3_LAUNCH_DESK_DIR: "X:\desk" });
+  assert.equal(d.cap, 4);
+  assert.equal(d.grantWindowMs, 3 * 60_000);
+  assert.equal(d.store.dir, "X:\desk");
+  const def = LaunchDesk.fromEnv({ LOCALAPPDATA: "C:\L" });
+  assert.equal(def.cap, 15);
+  assert.equal(def.grantWindowMs, 10 * 60_000);
+  assert.equal(def.store.dir, join("C:\L", "OttoSystems", "launch-desk"));
+  for (const bad of ["", "abc", "-1", "2.5"]) {
+    assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_CAP: bad, LOCALAPPDATA: "C:\L" }).cap, 15, `cap ${JSON.stringify(bad)}`);
+  }
+  assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_CAP: "0", LOCALAPPDATA: "C:\L" }).cap, 0);
+});
+
+test("effort is set on a record-form option bag too", async (t) => {
+  const { call, t3 } = await setup(t, {
+    defaultModelSelection: { instanceId: "claude", model: "m", options: { fastMode: false } },
+  });
+  await call("create_thread", create("Lane A"));
+  assert.deepEqual(t3.state.dispatched[0].modelSelection.options, { fastMode: false, effort: "high" });
+});
+
+test("launch_queue clips long agent text to 200 characters", async (t) => {
+  const { call } = await setup(t, { cap: 0 });
+  await call("create_thread", create("L".repeat(500)));
+  const q = await call("launch_queue", {});
+  assert.equal(q.waiting[0].lane, `<untrusted-data>${"L".repeat(200)}…</untrusted-data>`);
+});
