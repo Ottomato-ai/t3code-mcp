@@ -1,9 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { T3Client } from "../client.js";
+import { wasNotSent, type T3Client } from "../client.js";
 import { attentionOf, newId, nowIso, pendingRequests } from "../model.js";
-import type { ThreadShell } from "../model.js";
+import type { ModelSelection, ThreadShell } from "../model.js";
 import { errorResult, jsonResult, messageRow, relTime, truncate } from "../format.js";
+import type { LaunchDesk } from "../desk/desk.js";
+import { runningThreadIds } from "../desk/running.js";
+import { failLaunch, queuedResult, recordLaunch } from "./desk.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -12,7 +15,20 @@ function needsHuman(t: ThreadShell): boolean {
   return a === "needs-approval" || a === "needs-input" || a === "plan-ready" || a === "error";
 }
 
-export function registerPhase2(server: McpServer, getClient: () => T3Client) {
+/** Set the effort option on a model selection, keeping its other options. */
+export function withEffort(sel: ModelSelection, effort: string): ModelSelection {
+  if (sel.options !== undefined && !Array.isArray(sel.options)) {
+    return { ...sel, options: { ...sel.options, effort } };
+  }
+  const others = (sel.options ?? []).filter((o) => o.id !== "effort");
+  return { ...sel, options: [...others, { id: "effort", value: effort }] };
+}
+
+export function registerPhase2(
+  server: McpServer,
+  getClient: () => T3Client,
+  getDesk: () => LaunchDesk,
+) {
   server.registerTool(
     "pending_actions",
     {
@@ -137,13 +153,26 @@ export function registerPhase2(server: McpServer, getClient: () => T3Client) {
       title: "Start a new T3 thread",
       description:
         "Create a new agent thread in a project and send its first message, starting the agent. " +
-        "The thread runs directly in the project workspace (worktree isolation is only available " +
-        "from the T3 UI). Model defaults to the project's default, falling back to the project's " +
-        "most recent thread's model. runtimeMode defaults to approval-required (safest); pass " +
-        "full-access for autonomous work.",
+        "Gated by the launch desk: at most T3_LAUNCH_CAP (default 15) live T3 threads across all " +
+        "lanes. If a slot is free and nobody waits ahead, it launches at once; otherwise it answers " +
+        "queued with a queue_entry. Do not retry in a loop: call launch_wait, then call " +
+        "create_thread again with queue_entry once granted. The thread runs directly in the project " +
+        "workspace (worktree isolation is only available from the T3 UI). Model defaults to the " +
+        "project's default, falling back to the project's most recent thread's model; effort " +
+        "defaults to high. runtimeMode defaults to approval-required (safest); pass full-access for " +
+        "autonomous work.",
       inputSchema: {
         projectId: z.string().describe("Project id (from list_projects)"),
         message: z.string().min(1).describe("First user message / task description"),
+        lane: z.string().min(1).describe("Your exact session title (the launch queue is per lane)"),
+        queue_entry: z
+          .string()
+          .optional()
+          .describe("Entry id from an earlier queued answer, once launch_wait says granted"),
+        ned_requested: z
+          .boolean()
+          .optional()
+          .describe("True only when Ned asked for this launch himself in your session (goes first; logged)"),
         title: z.string().optional().describe("Thread title (default: derived from message)"),
         provider: z
           .string()
@@ -153,7 +182,7 @@ export function registerPhase2(server: McpServer, getClient: () => T3Client) {
         effort: z
           .enum(["low", "medium", "high", "xhigh", "max"])
           .optional()
-          .describe("Reasoning effort for the new thread (default high when provider and model are given; never max unless asked)"),
+          .describe("Reasoning effort for the new thread (default high; max only with ned_requested)"),
         runtimeMode: z
           .enum(["approval-required", "auto-accept-edits", "auto", "full-access"])
           .optional()
@@ -163,6 +192,11 @@ export function registerPhase2(server: McpServer, getClient: () => T3Client) {
     },
     async (args) => {
       try {
+        if (args.effort === "max" && args.ned_requested !== true) {
+          return errorResult(
+            new Error("effort max is refused unless Ned asked for it himself (ned_requested: true). Use high."),
+          );
+        }
         const client = getClient();
         const shell = await client.shell();
         const project = shell.projects.find((p) => p.id === args.projectId);
@@ -171,13 +205,9 @@ export function registerPhase2(server: McpServer, getClient: () => T3Client) {
             new Error(`No project with id ${args.projectId}. Use list_projects to find one.`),
           );
         }
-        let modelSelection =
+        let modelSelection: ModelSelection | null =
           args.provider && args.model
-            ? {
-                instanceId: args.provider,
-                model: args.model,
-                options: [{ id: "effort", value: args.effort ?? "high" }],
-              }
+            ? { instanceId: args.provider, model: args.model }
             : (project.defaultModelSelection ?? null);
         if (!modelSelection) {
           const recent = shell.threads
@@ -193,43 +223,79 @@ export function registerPhase2(server: McpServer, getClient: () => T3Client) {
             ),
           );
         }
-        const threadId = newId();
+        const selection = withEffort(modelSelection, args.effort ?? "high");
         const runtimeMode = args.runtimeMode ?? "approval-required";
         const interactionMode = args.interactionMode ?? "default";
         const title = args.title ?? truncate(args.message.replace(/\s+/g, " "), 60).text;
-        // The HTTP dispatch path has no bootstrap expansion (that lives in the
-        // WS handler), so create the thread and start the turn as two commands.
-        await client.dispatch({
-          type: "thread.create",
-          commandId: newId(),
-          threadId,
-          projectId: project.id,
-          title,
-          modelSelection,
-          runtimeMode,
-          interactionMode,
-          branch: null,
-          worktreePath: null,
-          createdAt: nowIso(),
-        });
-        const result = await client.dispatch({
-          type: "thread.turn.start",
-          commandId: newId(),
-          threadId,
-          message: { messageId: newId(), role: "user", text: args.message, attachments: [] },
-          runtimeMode,
-          interactionMode,
-          createdAt: nowIso(),
-        });
+
+        const desk = getDesk();
+        const admission = desk.admit(
+          {
+            lane: args.lane,
+            projectId: project.id,
+            project: project.title,
+            task: title,
+            ned: args.ned_requested === true,
+            queueEntry: args.queue_entry,
+          },
+          runningThreadIds(shell),
+        );
+        if (admission.kind === "queued") return queuedResult(admission, "create_thread");
+
+        const threadId = newId();
+        let result: { sequence: number };
+        // Sent means the request may have reached T3; only a refused connection is "not sent".
+        let createSent = false;
+        try {
+          // The HTTP dispatch path has no bootstrap expansion (that lives in the
+          // WS handler), so create the thread and start the turn as two commands.
+          try {
+            await client.dispatch({
+              type: "thread.create",
+              commandId: newId(),
+              threadId,
+              projectId: project.id,
+              title,
+              modelSelection: selection,
+              runtimeMode,
+              interactionMode,
+              branch: null,
+              worktreePath: null,
+              createdAt: nowIso(),
+            });
+          } catch (e) {
+            createSent = !wasNotSent(e);
+            throw e;
+          }
+          createSent = true;
+          result = await client.dispatch({
+            type: "thread.turn.start",
+            commandId: newId(),
+            threadId,
+            message: { messageId: newId(), role: "user", text: args.message, attachments: [] },
+            runtimeMode,
+            interactionMode,
+            createdAt: nowIso(),
+          });
+        } catch (e) {
+          throw failLaunch(desk, admission.entry.id, admission.claim, e, {
+            sent: createSent,
+            threadId,
+            tool: "create_thread",
+          });
+        }
+        const warning = recordLaunch(desk, admission.entry.id, admission.claim, threadId);
         return jsonResult({
           created: true,
           threadId,
           title,
           project: project.title,
-          model: `${modelSelection.instanceId}/${modelSelection.model}`,
+          model: `${selection.instanceId}/${selection.model}`,
           runtimeMode,
+          queue_entry: admission.entry.id,
           sequence: result.sequence,
-          note: "Agent is starting. Use wait_for_turn to get the first reply.",
+          ...(warning ? { warning } : {}),
+          note: "Agent is starting. Use wait_for_turn to get the first reply. Stop the thread (stop_thread) when it is done.",
         });
       } catch (e) {
         return errorResult(e);
