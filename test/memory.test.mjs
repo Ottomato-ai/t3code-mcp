@@ -72,7 +72,7 @@ test("default heartbeat file: HOST_GUARD_HOME, else %USERPROFILE%\\.host-guard",
   assert.equal(defaultHostGuardFile({ HOME: "/home/n" }), join("/home/n", ".host-guard", "heartbeat.json"));
 });
 
-test("running count: sessions running, ready or starting, not archived", () => {
+test("running count: sessions running, ready, starting or interrupted (T3 0.0.45 keeps the provider process), not archived", () => {
   const th = (id, status, archivedAt = null) => ({ id, archivedAt, session: status ? { threadId: id, status } : null });
   const shell = {
     threads: [
@@ -87,5 +87,5 @@ test("running count: sessions running, ready or starting, not archived", () => {
       th("archived", "running", "2026-10-11T00:00:00Z"),
     ],
   };
-  assert.deepEqual(runningThreadIds(shell), ["run", "ready", "start"]);
+  assert.deepEqual(runningThreadIds(shell), ["run", "ready", "start", "interrupted"]);
 });

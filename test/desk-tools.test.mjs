@@ -12,6 +12,7 @@ import { registerPhase2 } from "../dist/tools/phase2.js";
 import { registerLaunchDesk } from "../dist/tools/desk.js";
 import { LaunchDesk, isLeadLane } from "../dist/desk/desk.js";
 import { DeskStore } from "../dist/desk/store.js";
+import { T3Error } from "../dist/client.js";
 import { fakeClient, parse, tempDir, T0 } from "./helpers.mjs";
 
 const LEAD = "(Resume) ** OttoContext";
@@ -177,6 +178,53 @@ test("a retry after a dispatch failure does not launch a second thread", async (
   assert.equal(creates(s.t3).length, 1);
 });
 
+test("a desk failure after a successful launch still answers created, with a warning (no retry, no second thread)", async (t) => {
+  const { call, t3, desk } = await setup(t, { cap: 2 });
+  desk.markLaunched = () => { throw new Error("desk.json locked"); };
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.created, true);
+  assert.match(r.warning, /desk\.json locked/);
+  assert.match(r.warning, /do not retry/i);
+  assert.equal(creates(t3).length, 1);
+});
+
+test("a connection refused before thread.create keeps the grant; the retry launches once", async (t) => {
+  const s = await setup(t, { cap: 1 });
+  const id = await grantedEntry(s);
+  const ok = s.t3.dispatch;
+  s.t3.dispatch = async () => { throw new T3Error("Could not reach the T3 Code server", { notSent: true }); };
+  const r = await s.call("create_thread", create("Lane A", { queue_entry: id }));
+  assert.equal(r.isError, true);
+  assert.match(r.text, new RegExp(`queue_entry=${id}`));
+  assert.equal(s.entry(id).state, "granted");
+  s.t3.dispatch = ok;
+  const again = await s.call("create_thread", create("Lane A", { queue_entry: id }));
+  assert.equal(again.created, true);
+  assert.equal(creates(s.t3).length, 1);
+});
+
+test("a connection refused on an immediate launch keeps its grant for a retry with queue_entry", async (t) => {
+  const { call, t3, store } = await setup(t, { cap: 1 });
+  t3.dispatch = async () => { throw new T3Error("refused", { notSent: true }); };
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.isError, true);
+  const e = store.read().entries[0];
+  assert.equal(e.state, "granted");
+  assert.match(r.text, new RegExp(`queue_entry=${e.id}`));
+});
+
+test("a failure after thread.create was sent (turn start fails) marks the entry failed", async (t) => {
+  const { call, t3, store } = await setup(t, { cap: 1 });
+  const ok = t3.dispatch;
+  t3.dispatch = async (cmd) => {
+    if (cmd.type === "thread.turn.start") throw new T3Error("refused", { notSent: true });
+    return ok(cmd);
+  };
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.isError, true);
+  assert.equal(store.read().entries[0].state, "failed");
+});
+
 test("a failed immediate launch is marked failed and holds its slot for 2 minutes", async (t) => {
   const { call, t3, store } = await setup(t, { cap: 1 });
   t3.dispatch = async () => { throw new Error("T3 down"); };
@@ -267,6 +315,41 @@ test("send_message to a stopped thread queues when full, then sends on its grant
   assert.equal(r.sent, true);
   assert.equal(entry(q.queue_entry).state, "launched");
   assert.equal(t3.state.dispatched.length, 1);
+});
+
+test("send_message to an interrupted thread is not gated (the provider process is still alive)", async (t) => {
+  const { call, t3, store } = await setup(t, { cap: 0, statuses: { th5: "interrupted" } });
+  const r = await call("send_message", { threadId: "th5", message: "continue" });
+  assert.equal(r.sent, true);
+  assert.equal(t3.state.dispatched.length, 1);
+  assert.equal(store.read().entries.length, 0);
+});
+
+test("send_message to an errored thread is gated (its process may be gone)", async (t) => {
+  const { call, t3 } = await setup(t, { cap: 2, statuses: { th6: "error" } });
+  const r = await call("send_message", { threadId: "th6", message: "retry" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /lane/);
+  assert.equal(t3.state.dispatched.length, 0);
+});
+
+test("a desk failure after a successful restart still answers sent, with a warning", async (t) => {
+  const { call, t3, desk } = await setup(t, { cap: 2 });
+  desk.markLaunched = () => { throw new Error("desk.json locked"); };
+  const r = await call("send_message", { threadId: "th9", message: "wake up", lane: "Lane A" });
+  assert.equal(r.sent, true);
+  assert.match(r.warning, /desk\.json locked/);
+  assert.equal(t3.state.dispatched.length, 1);
+});
+
+test("a connection refused on a restart keeps the grant", async (t) => {
+  const { call, t3, store } = await setup(t, { cap: 2 });
+  t3.dispatch = async () => { throw new T3Error("refused", { notSent: true }); };
+  const r = await call("send_message", { threadId: "th9", message: "wake up", lane: "Lane A" });
+  assert.equal(r.isError, true);
+  const e = store.read().entries[0];
+  assert.equal(e.state, "granted");
+  assert.match(r.text, new RegExp(`queue_entry=${e.id}`));
 });
 
 test("a failed restart marks the entry failed", async (t) => {

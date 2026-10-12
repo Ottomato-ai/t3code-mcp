@@ -1,13 +1,15 @@
 // Launch desk store: pure queue rules plus the shared desk.json file.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as S from "../dist/desk/store.js";
 import { T0, MIN, HOUR, tempDir, ownerOnlyAcl, inheritedAcl } from "./helpers.mjs";
 
+/** pid of a process that has already exited. */
+const DEAD = spawnSync(process.execPath, ["-e", ""]).pid;
 const ctx = (o = {}) => ({ runningThreadIds: [], cap: 2, commitPercent: 50, nowMs: T0, ...o });
 const add = (st, lane, priority = "normal", at = T0) =>
   S.enqueue(st, { lane, project: "Scratch", project_id: "p1", task: `task ${lane}`, priority, nowMs: at });
@@ -391,49 +393,88 @@ test("two processes share one lock: no update is lost", async (t) => {
   assert.equal(new Set(st.entries.map((e) => e.sort_key)).size, 50, "sort keys stay unique across processes");
 });
 
-test("two breakers and a stale lock: one breaks it, no update is lost, nothing is left behind", async (t) => {
+test("two breakers and a dead holder's lock: one breaks it, no update is lost, nothing is left behind", async (t) => {
   const dir = tempDir(t);
   new S.DeskStore(dir).ensureDir();
   const lock = join(dir, "desk.lock");
-  writeFileSync(lock, "999999:dead");
-  age(lock, 20_000);
+  writeFileSync(lock, `${DEAD}:dead`);
   await runWriters(dir, ["one-", "two-"], 10);
   assert.equal(new S.DeskStore(dir).read().entries.length, 20);
   assert.equal(events(dir).filter((e) => e.type === "stale_lock_broken").length, 1);
   assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock")), []);
 });
 
-test("a stale lock (older than 15 s) is broken by renaming it away", (t) => {
+test("a lock whose holder process is dead is broken at once, by renaming it away", (t) => {
+  const dir = tempDir(t);
+  const store = new S.DeskStore(dir);
+  store.ensureDir();
+  writeFileSync(join(dir, "desk.lock"), `${DEAD}:dead`);
+  store.update((st) => add(st, "A"));
+  assert.equal(store.read().entries.length, 1);
+  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock")), []);
+  assert.equal(events(dir).find((e) => e.type === "stale_lock_broken").holder, `${DEAD}:dead`);
+});
+
+test("a lock whose holder is alive is not broken before 60 s, even when it is stalled", (t) => {
+  const dir = tempDir(t);
+  const store = new S.DeskStore(dir, { lockTimeoutMs: 300 });
+  store.ensureDir();
+  const lock = join(dir, "desk.lock");
+  writeFileSync(lock, `${process.pid}:stalled-holder`);
+  age(lock, 59_000);
+  assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/);
+  assert.equal(readFileSync(lock, "utf8"), `${process.pid}:stalled-holder`);
+});
+
+test("a lock 60 s or older is broken even when its holder is alive", (t) => {
   const dir = tempDir(t);
   const store = new S.DeskStore(dir);
   store.ensureDir();
   const lock = join(dir, "desk.lock");
-  writeFileSync(lock, "999999:dead");
-  age(lock, 16_000);
+  writeFileSync(lock, `${process.pid}:hung-holder`);
+  age(lock, 60_500);
   store.update((st) => add(st, "A"));
   assert.equal(store.read().entries.length, 1);
-  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock")), []);
 });
 
-test("a fresh lock that replaced the stale one before the rename is put back, not broken", (t) => {
+test("a lock without a readable pid (still being written, or garbage) waits for 60 s", (t) => {
+  for (const content of ["", "garbage", "abc:def"]) {
+    const dir = tempDir(t);
+    const store = new S.DeskStore(dir, { lockTimeoutMs: 200 });
+    store.ensureDir();
+    const lock = join(dir, "desk.lock");
+    writeFileSync(lock, content);
+    age(lock, 30_000);
+    assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/, JSON.stringify(content));
+    age(lock, 61_000);
+    store.update((st) => add(st, "A"));
+  }
+});
+
+test("lockHolderDead: dead pid true; live, own, missing or garbage pid false", () => {
+  assert.equal(S.lockHolderDead(`${DEAD}:x`), true);
+  assert.equal(S.lockHolderDead(`${process.pid}:x`), false);
+  assert.equal(S.lockHolderDead(`${process.ppid}:x`), false);
+  for (const v of [null, "", "x", ":x", "0:x", "-5:x", "12a:x"]) assert.equal(S.lockHolderDead(v), false, JSON.stringify(v));
+});
+
+test("a lock replaced during the break is not put back; nothing is left behind", (t) => {
   const dir = tempDir(t);
   const lock = join(dir, "desk.lock");
   let raced = false;
   const store = new S.DeskStore(dir, {
-    lockTimeoutMs: 300,
     testHook: (stage) => {
       if (raced || stage !== "rename") return;
       raced = true;
-      writeFileSync(lock, "777:fresh"); // another process broke the stale lock and took a new one
+      writeFileSync(lock, `${process.pid}:other-holder`); // replaced between the check and the rename
     },
   });
   store.ensureDir();
-  writeFileSync(lock, "999999:dead");
-  age(lock, 20_000);
-  assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/);
-  assert.equal(readFileSync(lock, "utf8"), "777:fresh");
-  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock.stale")), []);
-  assert.equal(events(dir).filter((e) => e.type === "stale_lock_broken").length, 0);
+  writeFileSync(lock, `${DEAD}:dead`);
+  store.update((st) => add(st, "A"));
+  assert.equal(store.read().entries.length, 1);
+  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock")), []);
+  assert.equal(events(dir).find((e) => e.type === "stale_lock_broken").holder, `${process.pid}:other-holder`);
 });
 
 test("inside the break guard the lock is checked again: a lock taken meanwhile is not broken", (t) => {
@@ -442,54 +483,63 @@ test("inside the break guard the lock is checked again: a lock taken meanwhile i
   const store = new S.DeskStore(dir, {
     lockTimeoutMs: 300,
     testHook: (stage) => {
-      if (stage === "guard") writeFileSync(lock, "888:new-holder"); // broken and re-taken by another process
+      if (stage === "guard") writeFileSync(lock, `${process.pid}:new-holder`); // broken and re-taken by another process
     },
   });
   store.ensureDir();
-  writeFileSync(lock, "999999:dead");
-  age(lock, 20_000);
+  writeFileSync(lock, `${DEAD}:dead`);
   assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/);
-  assert.equal(readFileSync(lock, "utf8"), "888:new-holder");
+  assert.equal(readFileSync(lock, "utf8"), `${process.pid}:new-holder`);
   assert.equal(events(dir).filter((e) => e.type === "stale_lock_broken").length, 0);
 });
 
-test("while another process holds the break guard, the stale lock is left to it", (t) => {
+test("while a live breaker holds the break guard, the stale lock is left to it", (t) => {
   const dir = tempDir(t);
   const store = new S.DeskStore(dir, { lockTimeoutMs: 300 });
   store.ensureDir();
   const lock = join(dir, "desk.lock");
-  writeFileSync(lock, "999999:dead");
-  age(lock, 20_000);
-  writeFileSync(join(dir, "desk.lock.break"), "");
+  writeFileSync(lock, `${DEAD}:dead`);
+  const guard = join(dir, "desk.lock.break");
+  writeFileSync(guard, `${process.pid}:live-breaker`);
   assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/);
-  assert.equal(readFileSync(lock, "utf8"), "999999:dead");
-  assert.ok(existsSync(join(dir, "desk.lock.break")), "a fresh guard is not removed");
+  assert.equal(readFileSync(lock, "utf8"), `${DEAD}:dead`);
+  assert.equal(readFileSync(guard, "utf8"), `${process.pid}:live-breaker`, "a live guard is not removed");
 });
 
-test("a break guard left by a breaker that died is cleared", (t) => {
+test("a break guard left by a breaker that died is cleared by rename-aside", (t) => {
   const dir = tempDir(t);
   const store = new S.DeskStore(dir);
   store.ensureDir();
-  const lock = join(dir, "desk.lock");
-  writeFileSync(lock, "999999:dead");
-  age(lock, 20_000);
-  const guard = join(dir, "desk.lock.break");
-  writeFileSync(guard, "");
-  age(guard, 20_000);
+  writeFileSync(join(dir, "desk.lock"), `${DEAD}:dead`);
+  writeFileSync(join(dir, "desk.lock.break"), `${DEAD}:dead-breaker`);
   store.update((st) => add(st, "A"));
   assert.equal(store.read().entries.length, 1);
   assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock")), []);
 });
 
-test("a fresh lock held by another process makes update time out", (t) => {
+test("a breaker removes the guard only while it still holds its own token", (t) => {
+  const dir = tempDir(t);
+  const guard = join(dir, "desk.lock.break");
+  const store = new S.DeskStore(dir, {
+    testHook: (stage) => {
+      if (stage === "guard") writeFileSync(guard, `${DEAD}:another-breaker`);
+    },
+  });
+  store.ensureDir();
+  writeFileSync(join(dir, "desk.lock"), `${DEAD}:dead`);
+  store.update((st) => add(st, "A"));
+  assert.equal(readFileSync(guard, "utf8"), `${DEAD}:another-breaker`);
+});
+
+test("a fresh lock held by a live process makes update time out without taking the guard", (t) => {
   const dir = tempDir(t);
   let guards = 0;
   const store = new S.DeskStore(dir, { lockTimeoutMs: 200, testHook: (stage) => { if (stage === "guard") guards++; } });
   store.ensureDir();
-  writeFileSync(join(dir, "desk.lock"), "999999:other");
+  writeFileSync(join(dir, "desk.lock"), `${process.pid}:other`);
   assert.throws(() => store.update((st) => add(st, "A")), /lock/i);
-  assert.equal(readFileSync(join(dir, "desk.lock"), "utf8"), "999999:other");
-  assert.equal(guards, 0, "a fresh lock does not take the break guard");
+  assert.equal(readFileSync(join(dir, "desk.lock"), "utf8"), `${process.pid}:other`);
+  assert.equal(guards, 0, "a live fresh lock does not take the break guard");
 });
 
 test("the lock file holds pid:token", (t) => {
@@ -502,11 +552,22 @@ test("the lock file holds pid:token", (t) => {
   assert.match(seen, new RegExp(`^${process.pid}:[0-9a-f-]{36}$`));
 });
 
-test("release deletes the lock only while it is still ours", (t) => {
+test("a holder that lost its lock does not write and does not delete the new holder's lock", (t) => {
   const dir = tempDir(t);
   const store = new S.DeskStore(dir);
-  store.update(() => writeFileSync(join(dir, "desk.lock"), "4242:someone-else"));
-  assert.equal(readFileSync(join(dir, "desk.lock"), "utf8"), "4242:someone-else");
+  store.update((st) => add(st, "A"));
+  const before = readFileSync(join(dir, "desk.json"), "utf8");
+  assert.throws(
+    () =>
+      store.update((st) => {
+        add(st, "B");
+        writeFileSync(join(dir, "desk.lock"), `${process.pid}:new-holder`); // our lock was broken and re-taken
+      }),
+    /lock/,
+  );
+  assert.equal(readFileSync(join(dir, "desk.json"), "utf8"), before, "the old snapshot is not written");
+  assert.equal(readFileSync(join(dir, "desk.lock"), "utf8"), `${process.pid}:new-holder`);
+  assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith(".tmp")), []);
 });
 
 test("lockBusy: EEXIST and EPERM mean busy, other errors do not", () => {

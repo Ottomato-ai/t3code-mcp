@@ -30,6 +30,8 @@ export function inheritedAcl(dir, user = "TESTDOMAIN\\tester") {
 export function fakeClient(opts = {}) {
   const state = {
     running: opts.running ?? [],
+    /** Session status per thread id for thread(); default running if in running, else stopped. */
+    statuses: opts.statuses ?? {},
     dispatched: [],
     shellCalls: 0,
     dispatchDelayMs: opts.dispatchDelayMs ?? 0,
@@ -73,7 +75,7 @@ export function fakeClient(opts = {}) {
       };
     },
     async thread(id) {
-      const t = threadShell(id, state.running.includes(id) ? "running" : "stopped");
+      const t = threadShell(id, state.statuses[id] ?? (state.running.includes(id) ? "running" : "stopped"));
       return { snapshotSequence: seq, thread: { ...t, messages: [], activities: [] } };
     },
     async dispatch(cmd) {
