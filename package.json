@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs",
+    "test": "tsc && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs && node --test test/headroom.test.mjs",
     "smoke": "node scripts/smoke.mjs"
   },
   "engines": {

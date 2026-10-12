@@ -2,7 +2,7 @@
 // launch_queue, launch_cancel, launch_queue_move. In-memory MCP client, fake T3 client.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -31,6 +31,7 @@ async function setup(t, opts = {}) {
     pollMs: 20,
     shellIntervalMs: opts.shellIntervalMs ?? 0,
     leadLane: opts.leadLane,
+    readHeadroom: opts.headroom ? () => opts.headroom : undefined,
   });
   const server = new McpServer({ name: "test", version: "0" });
   registerPhase1(server, () => t3, () => desk);
@@ -42,7 +43,7 @@ async function setup(t, opts = {}) {
   t.after(() => client.close());
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
   const entry = (id) => store.read().entries.find((e) => e.id === id);
-  return { dir, t3, clock, memory, store, desk, call, entry };
+  return { dir, t3, clock, memory, store, desk, call, entry, headroom: opts.headroom };
 }
 
 const create = (lane, extra = {}) => ({ projectId: "p1", message: "do the thing", lane, ...extra });
@@ -760,4 +761,147 @@ test("the warning path on a restart logs launch_warning for that thread", async 
   assert.equal(w.length, 1);
   assert.equal(w[0].id, r.queue_entry);
   assert.equal(w[0].thread_id, "th9");
+});
+
+// ---------- phase 2: extra slots from Host Guard headroom (F-45) ----------
+
+const fifteen = () => Array.from({ length: 15 }, (_, i) => `r${i}`);
+const room = (o = {}) => ({ status: "ok", at: T0 - 1000, baseCap: 15, hardCap: 20, live: 15, allowedExtra: 2, measuring: null, detail: null, ...o });
+const capEvents = (dir) => (existsSync(join(dir, "events.jsonl")) ? eventLines(dir).filter((e) => e.type === "cap") : []);
+
+test("headroom unreadable: the cap stays at 15", async (t) => {
+  const { call, t3 } = await setup(t, { cap: 15, running: fifteen(), headroom: room({ status: "unreadable", allowedExtra: 5 }) });
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.queued, true);
+  assert.equal(r.cap, 15);
+  assert.equal(t3.state.dispatched.length, 0);
+  const q = await call("launch_queue", {});
+  assert.equal(q.cap, 15);
+  assert.equal(q.cap_reason, "unreadable");
+});
+
+test("an extra slot launches one thread, then waits until Host Guard has measured it", async (t) => {
+  const s = await setup(t, { cap: 15, running: fifteen(), headroom: room() });
+  const a = await s.call("create_thread", create("Lane A"));
+  assert.equal(a.created, true, "16th thread on an extra slot");
+  assert.equal(s.entry(a.queue_entry).extra, true);
+  const b = await s.call("create_thread", create("Lane B"));
+  assert.equal(b.queued, true, "no second extra before a measurement");
+  let q = await s.call("launch_queue", {});
+  assert.equal(q.cap, 15);
+  assert.equal(q.cap_reason, "pending-measurement");
+  // Host Guard writes a newer record while it measures the new thread: still no extra.
+  Object.assign(s.headroom, { at: T0 + 1000, measuring: a.threadId });
+  s.t3.state.running = [...fifteen(), a.threadId];
+  await s.desk.tickOnce(s.t3);
+  assert.equal(s.entry(b.queue_entry).state, "waiting");
+  q = await s.call("launch_queue", {});
+  assert.equal(q.cap_reason, "measuring");
+  // Measured: the next extra may go. Host Guard formula: max(baseCap, live) + allowedExtra,
+  // so with 16 live threads allowedExtra 1 allows the 17th.
+  Object.assign(s.headroom, { at: T0 + 2000, measuring: null, live: 16, allowedExtra: 1 });
+  await s.desk.tickOnce(s.t3);
+  assert.equal(s.entry(b.queue_entry).state, "granted");
+  assert.equal(s.entry(b.queue_entry).extra, true);
+});
+
+test("a stale headroom record or a measurement in progress gives no extra", async (t) => {
+  for (const h of [room({ status: "stale" }), room({ measuring: "thX" }), room({ status: "schema" })]) {
+    const { call } = await setup(t, { cap: 15, running: fifteen(), headroom: h });
+    const r = await call("create_thread", create("Lane A"));
+    assert.equal(r.queued, true, JSON.stringify(h));
+  }
+});
+
+test("never above 20, whatever the file says", async (t) => {
+  const running = Array.from({ length: 19 }, (_, i) => `r${i}`);
+  const s = await setup(t, { cap: 15, running, headroom: room({ allowedExtra: 50, hardCap: 99 }) });
+  const a = await s.call("create_thread", create("Lane A"));
+  assert.equal(a.created, true, "the 20th");
+  Object.assign(s.headroom, { at: T0 + 5000, live: 20 });
+  s.t3.state.running = [...running, a.threadId];
+  const b = await s.call("create_thread", create("Lane B"));
+  assert.equal(b.queued, true);
+  assert.equal(b.cap, 20);
+});
+
+test("within the base cap the headroom file changes nothing", async (t) => {
+  const { call } = await setup(t, { cap: 15, running: ["x"], headroom: room({ status: "unreadable" }) });
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.created, true);
+});
+
+test("launch_queue shows the effective cap and why", async (t) => {
+  const { call } = await setup(t, { cap: 15, running: ["x"], headroom: room({ allowedExtra: 3, measuring: null }) });
+  const q = await call("launch_queue", {});
+  assert.equal(q.cap, 18);
+  assert.equal(q.cap_base, 15);
+  assert.equal(q.cap_extra, 3);
+  assert.equal(q.cap_reason, "extra");
+  assert.deepEqual(q.headroom, { status: "ok", at: new Date(T0 - 1000).toISOString(), allowed_extra: 3, measuring: null });
+});
+
+test("without a headroom source the cap is the configured one (reason config)", async (t) => {
+  const { call } = await setup(t, { cap: 2 });
+  const q = await call("launch_queue", {});
+  assert.equal(q.cap, 2);
+  assert.equal(q.cap_reason, "config");
+  assert.equal(q.headroom, null);
+});
+
+test("a cap event is logged only when the effective cap changes", async (t) => {
+  const s = await setup(t, { cap: 15, running: ["x"], headroom: room({ allowedExtra: 0 }) });
+  await s.call("create_thread", create("Lane A"));
+  await s.call("create_thread", create("Lane B"));
+  await s.desk.tickOnce(s.t3);
+  let caps = capEvents(s.dir);
+  assert.equal(caps.length, 1);
+  assert.deepEqual(Object.keys(caps[0]).sort(), ["at", "base", "effective", "extra", "reason", "type"]);
+  assert.deepEqual([caps[0].effective, caps[0].base, caps[0].extra, caps[0].reason], [15, 15, 0, "base"]);
+  s.headroom.allowedExtra = 2;
+  await s.call("create_thread", create("Lane C"));
+  await s.call("create_thread", create("Lane D"));
+  caps = capEvents(s.dir);
+  assert.equal(caps.length, 2);
+  assert.deepEqual([caps[1].effective, caps[1].extra, caps[1].reason], [17, 2, "extra"]);
+});
+
+test("launch_queue does not log a cap event (read-only)", async (t) => {
+  const { call, dir } = await setup(t, { cap: 15, headroom: room() });
+  await call("launch_queue", {});
+  assert.equal(capEvents(dir).length, 0);
+});
+
+test("fromEnv reads headroom.json from HOST_GUARD_HOME", (t) => {
+  const d = LaunchDesk.fromEnv({ HOST_GUARD_HOME: "X:\hg", LOCALAPPDATA: "C:\L" });
+  assert.equal(d.headroomFile, join("X:\hg", "headroom.json"));
+});
+
+test("fromEnv reads the real headroom file and uses it for the cap", (t) => {
+  const dir = tempDir(t);
+  writeFileSync(
+    join(dir, "headroom.json"),
+    JSON.stringify({ schema: "hostguard.headroom/v1", at: new Date().toISOString(), staleAfterSeconds: 120, baseCap: 15, hardCap: 20, allowedExtra: 3, measuring: null }),
+  );
+  const d = LaunchDesk.fromEnv({ HOST_GUARD_HOME: dir, T3_LAUNCH_DESK_DIR: join(dir, "desk") });
+  const v = d.view([]);
+  assert.equal(v.cap, 18);
+  assert.equal(v.capDecision.reason, "extra");
+});
+
+test("a cap change seen by the tick is logged, and the tick grants the extra", async (t) => {
+  const s = await setup(t, { cap: 15, running: fifteen(), headroom: room({ allowedExtra: 0 }) });
+  const a = await s.call("create_thread", create("Lane A"));
+  assert.equal(a.queued, true);
+  s.headroom.allowedExtra = 3;
+  await s.desk.tickOnce(s.t3);
+  assert.equal(s.entry(a.queue_entry).state, "granted");
+  const caps = capEvents(s.dir);
+  assert.deepEqual(caps.map((c) => [c.effective, c.reason]), [[15, "base"], [18, "extra"]]);
+});
+
+test("launch_queue free uses the effective cap", async (t) => {
+  const { call } = await setup(t, { cap: 15, running: ["x"], headroom: room({ allowedExtra: 3 }) });
+  const q = await call("launch_queue", {});
+  assert.equal(q.free, 17);
 });

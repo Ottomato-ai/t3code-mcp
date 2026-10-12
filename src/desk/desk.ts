@@ -6,6 +6,7 @@ import type { ShellSnapshot } from "../model.js";
 import { readHostGuardMemory, type MemoryReading } from "./memory.js";
 import { runningThreadIds } from "./running.js";
 import { untrusted } from "./untrusted.js";
+import { decideCap, defaultHeadroomFile, readHeadroom, type CapDecision, type HeadroomReading } from "./headroom.js";
 import {
   DeskStore,
   GRANT_WINDOW_MS,
@@ -54,6 +55,10 @@ export interface LaunchDeskOptions {
   shellIntervalMs?: number;
   /** Exact lead lane (T3_LAUNCH_LEAD_LANE); default: match "** OttoContext" after the status tag. */
   leadLane?: string;
+  /** Phase 2: Host Guard headroom (extra slots). Without it the cap is `cap` (reason config). */
+  readHeadroom?: () => HeadroomReading;
+  /** The headroom file read by readHeadroom (shown for diagnostics). */
+  headroomFile?: string;
 }
 
 export type Admission =
@@ -94,6 +99,8 @@ export class LaunchDesk {
   readonly pollMs: number;
   readonly shellIntervalMs: number;
   readonly leadLane: string | undefined;
+  readonly headroomFile: string | undefined;
+  private readonly readHeadroom: (() => HeadroomReading) | undefined;
   private readonly readMemory: () => MemoryReading;
   private readonly now: () => number;
   private lastMemoryStatus: MemoryReading["status"] = "ok";
@@ -110,11 +117,16 @@ export class LaunchDesk {
     this.pollMs = opts.pollMs ?? 3_000;
     this.shellIntervalMs = opts.shellIntervalMs ?? SHELL_INTERVAL_MS;
     this.leadLane = opts.leadLane || undefined;
+    this.readHeadroom = opts.readHeadroom;
+    this.headroomFile = opts.headroomFile;
   }
 
   /** T3_LAUNCH_CAP (15), T3_LAUNCH_GRANT_MINUTES (10), T3_LAUNCH_DESK_DIR, T3_LAUNCH_LEAD_LANE. */
   static fromEnv(env: NodeJS.ProcessEnv = process.env): LaunchDesk {
+    const headroomFile = defaultHeadroomFile(env);
     return new LaunchDesk({
+      headroomFile,
+      readHeadroom: () => readHeadroom({ file: headroomFile }),
       store: new DeskStore(defaultDeskDir(env)),
       cap: envInt(env.T3_LAUNCH_CAP, DEFAULT_CAP),
       grantWindowMs: envInt(env.T3_LAUNCH_GRANT_MINUTES, GRANT_WINDOW_MS / 60_000) * 60_000,
@@ -143,6 +155,32 @@ export class LaunchDesk {
     };
   }
 
+  /** The effective cap for this state: the configured cap, or phase 2 from Host Guard headroom. */
+  private capDecision(state: DeskState, reading: HeadroomReading | null): CapDecision {
+    if (!reading) return { effective: this.cap, base: this.cap, extra: 0, reason: "config", extraGrants: 0 };
+    const last = state.last_extra_at ? Date.parse(state.last_extra_at) : null;
+    return decideCap({ floor: this.cap, reading, lastExtraAt: last });
+  }
+
+  /** Inside the lock: put the decision into ctx; returns it when the effective cap changed. */
+  private applyCap(state: DeskState, ctx: SlotContext, reading: HeadroomReading | null): { decision: CapDecision; changed: boolean } {
+    const decision = this.capDecision(state, reading);
+    ctx.cap = decision.effective;
+    if (reading) {
+      ctx.baseCap = decision.base;
+      ctx.extraGrants = decision.extraGrants;
+    }
+    const changed = state.cap_effective !== decision.effective;
+    state.cap_effective = decision.effective;
+    return { decision, changed };
+  }
+
+  private logCap(cap: { decision: CapDecision; changed: boolean }): void {
+    if (!cap.changed) return;
+    const d = cap.decision;
+    this.store.logEvent({ type: "cap", effective: d.effective, base: d.base, extra: d.extra, reason: d.reason });
+  }
+
   /**
    * Decide a launch. Returns launch (the entry is claimed for this one call; finish with
    * markLaunched or launchFailed) or queued. Throws with an instruction for refusals.
@@ -150,6 +188,8 @@ export class LaunchDesk {
   admit(req: AdmitRequest, runningIds: string[]): Admission {
     const memory = this.memory();
     const ctx = this.ctx(runningIds, memory);
+    const reading = this.readHeadroom?.() ?? null;
+    let cap = { decision: this.capDecision({ version: 1, seq: 0, entries: [] }, reading), changed: false };
     const kind = req.kind ?? "create";
     const target = req.targetThreadId ?? null;
     const queued = (state: DeskState, e: DeskEntry): Admission => ({
@@ -157,7 +197,7 @@ export class LaunchDesk {
       entry: { ...e },
       position: positionOf(state, e.id) ?? 0,
       running: runningIds.length,
-      cap: this.cap,
+      cap: cap.decision.effective,
       memory,
     });
     const launch = (state: DeskState, e: DeskEntry): Admission => {
@@ -165,6 +205,7 @@ export class LaunchDesk {
       return { kind: "launch", entry: { ...e }, claim: token };
     };
     const result = this.store.update((state): Admission => {
+      cap = this.applyCap(state, ctx, reading);
       if (req.queueEntry) {
         const e = findEntry(state, req.queueEntry);
         if (e.lane !== req.lane) {
@@ -207,6 +248,7 @@ export class LaunchDesk {
       recompute(state, ctx);
       return e.state === "granted" ? launch(state, e) : queued(state, e);
     });
+    this.logCap(cap);
     if (req.ned && !req.queueEntry) {
       this.store.logEvent({ type: "ned_entry", id: result.entry.id, lane: req.lane, project: req.project, kind });
       console.error(`launch-desk: ned_requested entry ${result.entry.id} from lane ${JSON.stringify(req.lane)}.`);
@@ -236,7 +278,14 @@ export class LaunchDesk {
   /** Expire and grant with a running count taken from T3 now. */
   tick(runningIds: string[]) {
     const ctx = this.ctx(runningIds, this.memory());
-    return this.store.update((state) => recompute(state, ctx));
+    const reading = this.readHeadroom?.() ?? null;
+    let cap: { decision: CapDecision; changed: boolean } | undefined;
+    const out = this.store.update((state) => {
+      cap = this.applyCap(state, ctx, reading);
+      return recompute(state, ctx);
+    });
+    if (cap) this.logCap(cap);
+    return out;
   }
 
   /** The 30-second tick: only calls T3 when an entry is waiting, granted or launching. */
@@ -311,11 +360,15 @@ export class LaunchDesk {
     const nowMs = this.now();
     expireEntries(state, nowMs);
     const memory = this.memory();
-    const used = slotsUsed(state, { runningThreadIds: runningIds, cap: this.cap, commitPercent: null, nowMs });
+    const reading = this.readHeadroom?.() ?? null;
+    const decision = this.capDecision(state, reading);
+    const used = slotsUsed(state, { runningThreadIds: runningIds, cap: decision.effective, commitPercent: null, nowMs });
     return {
       running: runningIds.length,
-      cap: this.cap,
-      free: Math.max(0, this.cap - used),
+      cap: decision.effective,
+      capDecision: decision,
+      headroom: reading,
+      free: Math.max(0, decision.effective - used),
       memory,
       grants: state.entries.filter((e) => e.state === "granted" || e.state === "launching"),
       waiting: orderedWaiting(state).map((e, i) => ({ entry: e, position: i + 1 })),

@@ -769,3 +769,68 @@ function runWriters(dir, names, count) {
     if (bad) throw bad.reason;
   });
 }
+
+// ---------- phase 2 extra slots (F-45) ----------
+
+test("extra grants: beyond baseCap at most extraGrants per pass; flagged and timed", () => {
+  const st = S.emptyState();
+  const a = add(st, "A");
+  const b = add(st, "B");
+  const c = add(st, "C");
+  const running = Array.from({ length: 14 }, (_, i) => `r${i}`);
+  const r = S.recompute(st, ctx({ cap: 17, baseCap: 15, extraGrants: 1, runningThreadIds: running }));
+  assert.deepEqual(r.granted.map((e) => e.lane), ["A", "B"], "one base slot plus one extra");
+  assert.equal(a.extra, undefined, "a grant within the base is not extra");
+  assert.equal(b.extra, true);
+  assert.equal(c.state, "waiting");
+  assert.equal(st.last_extra_at, new Date(T0).toISOString());
+});
+
+test("extra grants: none when extraGrants is 0", () => {
+  const st = S.emptyState();
+  add(st, "A");
+  const running = Array.from({ length: 15 }, (_, i) => `r${i}`);
+  assert.equal(S.recompute(st, ctx({ cap: 17, baseCap: 15, extraGrants: 0, runningThreadIds: running })).granted.length, 0);
+  assert.equal(st.last_extra_at, undefined);
+});
+
+test("without baseCap there is no extra limit (phase 1 behaviour)", () => {
+  const st = S.emptyState();
+  for (const l of ["A", "B", "C"]) add(st, l);
+  assert.equal(S.recompute(st, ctx({ cap: 3 })).granted.length, 3);
+  assert.ok(st.entries.every((e) => e.extra === undefined));
+});
+
+test("launching an extra entry moves last_extra_at to the launch time", () => {
+  const st = S.emptyState();
+  const a = add(st, "A");
+  S.recompute(st, ctx({ cap: 1, baseCap: 0, extraGrants: 1 }));
+  assert.equal(a.extra, true);
+  const tok = S.claim(st, a.id, T0 + 5);
+  S.markLaunched(st, a.id, "th", T0 + 9, tok);
+  assert.equal(st.last_extra_at, new Date(T0 + 9).toISOString());
+  const n = add(st, "N");
+  S.recompute(st, ctx({ cap: 5 }));
+  const tok2 = S.claim(st, n.id, T0 + 20);
+  S.markLaunched(st, n.id, "th2", T0 + 30, tok2);
+  assert.equal(st.last_extra_at, new Date(T0 + 9).toISOString(), "a base launch does not move it");
+});
+
+test("validState: phase 2 fields are optional and typed", () => {
+  const st = S.emptyState();
+  add(st, "A").extra = true;
+  st.last_extra_at = new Date(T0).toISOString();
+  st.cap_effective = 17;
+  assert.equal(S.validState(JSON.parse(JSON.stringify(st))), true);
+  const bad = (m) => { const s = JSON.parse(JSON.stringify(st)); m(s); return S.validState(s); };
+  assert.equal(bad((s) => (s.last_extra_at = "never")), false);
+  assert.equal(bad((s) => (s.cap_effective = "17")), false);
+  assert.equal(bad((s) => (s.entries[0].extra = "yes")), false);
+  assert.equal(bad((s) => { s.last_extra_at = null; s.cap_effective = null; }), true);
+});
+
+test("extra grants: baseCap without extraGrants allows no extra", () => {
+  const st = S.emptyState();
+  add(st, "A");
+  assert.equal(S.recompute(st, ctx({ cap: 5, baseCap: 0 })).granted.length, 0);
+});
