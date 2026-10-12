@@ -14,6 +14,8 @@ export interface HeadroomReading {
   at: number | null;
   baseCap: number | null;
   hardCap: number | null;
+  /** Live T3 threads when Host Guard wrote the record (t3.live), or null. */
+  live: number | null;
   /** Whole, non-negative number of extra agents Host Guard allows now. */
   allowedExtra: number;
   /** Thread id Host Guard is measuring, or null. */
@@ -57,6 +59,7 @@ export function readHeadroom(opts: { file?: string; nowMs?: number } = {}): Head
     at: null,
     baseCap: null,
     hardCap: null,
+    live: null,
     allowedExtra: 0,
     measuring: null,
     detail,
@@ -79,6 +82,7 @@ export function readHeadroom(opts: { file?: string; nowMs?: number } = {}): Head
     at,
     baseCap: num(rec.baseCap),
     hardCap: num(rec.hardCap),
+    live: num((rec.t3 as { live?: unknown } | null | undefined)?.live),
     allowedExtra: allowed !== null && allowed > 0 ? Math.floor(allowed) : 0,
     measuring: typeof rec.measuring === "string" ? rec.measuring : null,
     detail: null,
@@ -88,8 +92,10 @@ export function readHeadroom(opts: { file?: string; nowMs?: number } = {}): Head
 }
 
 /**
- * Effective cap = baseCap + allowedExtra, at most hardCap, always within [floor, 20]
- * (floor: T3_LAUNCH_CAP, 15 by default). No extra when the record is stale, unreadable or of
+ * Host Guard formula: effective cap = max(baseCap, live) + allowedExtra, at most hardCap, always
+ * within [floor, 20] (floor: T3_LAUNCH_CAP, 15 by default). allowedExtra is how many more
+ * agents fit now and live is the record's t3.live, from the same snapshot. allowedExtra 0
+ * means no extra grant, even when more than the base cap run. No extra when the record is stale, unreadable or of
  * an unknown schema, while Host Guard measures a launch, or until a record newer than the
  * last extra launch has arrived.
  */
@@ -105,7 +111,8 @@ export function decideCap(input: { floor: number; reading: HeadroomReading; last
     return flat(base, "pending-measurement");
   }
   const allowed = Math.max(0, Math.floor(reading.allowedExtra));
-  const effective = clamp(Math.min(base + allowed, reading.hardCap ?? ceiling));
+  if (allowed === 0) return flat(base, "base");
+  const effective = clamp(Math.min(Math.max(base, reading.live ?? 0) + allowed, reading.hardCap ?? ceiling));
   const extra = effective - base;
   return extra > 0
     ? { effective, base, extra, reason: "extra", extraGrants: 1 }
