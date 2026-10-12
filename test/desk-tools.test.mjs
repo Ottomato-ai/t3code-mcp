@@ -766,7 +766,7 @@ test("the warning path on a restart logs launch_warning for that thread", async 
 // ---------- phase 2: extra slots from Host Guard headroom (F-45) ----------
 
 const fifteen = () => Array.from({ length: 15 }, (_, i) => `r${i}`);
-const room = (o = {}) => ({ status: "ok", at: T0 - 1000, baseCap: 15, hardCap: 20, allowedExtra: 2, measuring: null, detail: null, ...o });
+const room = (o = {}) => ({ status: "ok", at: T0 - 1000, baseCap: 15, hardCap: 20, live: 15, allowedExtra: 2, measuring: null, detail: null, ...o });
 const capEvents = (dir) => (existsSync(join(dir, "events.jsonl")) ? eventLines(dir).filter((e) => e.type === "cap") : []);
 
 test("headroom unreadable: the cap stays at 15", async (t) => {
@@ -797,12 +797,9 @@ test("an extra slot launches one thread, then waits until Host Guard has measure
   assert.equal(s.entry(b.queue_entry).state, "waiting");
   q = await s.call("launch_queue", {});
   assert.equal(q.cap_reason, "measuring");
-  // Measured: the next extra may go. The desk rule is baseCap + allowedExtra, so with 16 live
-  // threads the 17th needs allowedExtra 2.
-  Object.assign(s.headroom, { at: T0 + 2000, measuring: null, allowedExtra: 1 });
-  await s.desk.tickOnce(s.t3);
-  assert.equal(s.entry(b.queue_entry).state, "waiting", "15 + 1 = 16 slots, all used");
-  Object.assign(s.headroom, { at: T0 + 3000, allowedExtra: 2 });
+  // Measured: the next extra may go. Host Guard formula: max(baseCap, live) + allowedExtra,
+  // so with 16 live threads allowedExtra 1 allows the 17th.
+  Object.assign(s.headroom, { at: T0 + 2000, measuring: null, live: 16, allowedExtra: 1 });
   await s.desk.tickOnce(s.t3);
   assert.equal(s.entry(b.queue_entry).state, "granted");
   assert.equal(s.entry(b.queue_entry).extra, true);
@@ -821,7 +818,7 @@ test("never above 20, whatever the file says", async (t) => {
   const s = await setup(t, { cap: 15, running, headroom: room({ allowedExtra: 50, hardCap: 99 }) });
   const a = await s.call("create_thread", create("Lane A"));
   assert.equal(a.created, true, "the 20th");
-  Object.assign(s.headroom, { at: T0 + 5000 });
+  Object.assign(s.headroom, { at: T0 + 5000, live: 20 });
   s.t3.state.running = [...running, a.threadId];
   const b = await s.call("create_thread", create("Lane B"));
   assert.equal(b.queued, true);

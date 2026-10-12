@@ -28,7 +28,7 @@ const write = (dir, body) => {
   writeFileSync(file, typeof body === "string" ? body : JSON.stringify(body));
   return file;
 };
-const ok = (o = {}) => ({ status: "ok", at: T0, baseCap: 15, hardCap: 20, allowedExtra: 2, measuring: null, detail: null, ...o });
+const ok = (o = {}) => ({ status: "ok", at: T0, baseCap: 15, hardCap: 20, live: 6, allowedExtra: 2, measuring: null, detail: null, ...o });
 
 // ---------- reader ----------
 
@@ -44,6 +44,7 @@ test("a fresh record is read with its fields", (t) => {
   assert.equal(r.hardCap, 20);
   assert.equal(r.allowedExtra, 2);
   assert.equal(r.measuring, "th1");
+  assert.equal(r.live, 6);
   assert.equal(r.detail, null);
 });
 
@@ -169,4 +170,36 @@ test("reader: allowedExtra is floored and never negative; a non-object record is
 
 test("cap: a configured floor above 20 is kept", () => {
   assert.equal(decideCap({ floor: 25, reading: ok({ allowedExtra: 3, hardCap: 99 }), lastExtraAt: null }).effective, 25);
+});
+
+test("reader: live comes from t3.live, a number; otherwise null", (t) => {
+  const dir = tempDir(t);
+  assert.equal(readHeadroom({ file: write(dir, record({ t3: { live: 17 } })), nowMs: T0 }).live, 17);
+  assert.equal(readHeadroom({ file: write(dir, record({ t3: { live: "17" } })), nowMs: T0 }).live, null);
+  assert.equal(readHeadroom({ file: write(dir, record({ t3: undefined })), nowMs: T0 }).live, null);
+  assert.equal(readHeadroom({ file: write(dir, record({ t3: null })), nowMs: T0 }).live, null);
+  assert.equal(readHeadroom({ file: join(dir, "nope.json"), nowMs: T0 }).live, null);
+});
+
+test("cap: Host Guard formula, max(baseCap, live) + allowedExtra", () => {
+  assert.deepEqual(decideCap({ floor: 15, reading: ok({ live: 16, allowedExtra: 1 }), lastExtraAt: null }), {
+    effective: 17, base: 15, extra: 2, reason: "extra", extraGrants: 1,
+  });
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: 8, allowedExtra: 5 }), lastExtraAt: null }).effective, 20);
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: 19, allowedExtra: 5 }), lastExtraAt: null }).effective, 20);
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: 18, allowedExtra: 1, hardCap: 18 }), lastExtraAt: null }).effective, 18);
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: null, allowedExtra: 2 }), lastExtraAt: null }).effective, 17);
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: 16, allowedExtra: 1, baseCap: 17 }), lastExtraAt: null }).effective, 18);
+});
+
+test("cap: allowedExtra 0 means no extra, even when more than the base cap run", () => {
+  assert.deepEqual(decideCap({ floor: 15, reading: ok({ live: 17, allowedExtra: 0 }), lastExtraAt: null }), {
+    effective: 15, base: 15, extra: 0, reason: "base", extraGrants: 0,
+  });
+});
+
+test("cap: live above the base does not bypass measuring or a pending measurement", () => {
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: 17, allowedExtra: 2, measuring: "x" }), lastExtraAt: null }).effective, 15);
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: 17, allowedExtra: 2 }), lastExtraAt: T0 }).effective, 15);
+  assert.equal(decideCap({ floor: 15, reading: ok({ live: 17, allowedExtra: 2, status: "stale" }), lastExtraAt: null }).effective, 15);
 });
