@@ -415,6 +415,27 @@ test("a stale lock (older than 15 s) is broken by renaming it away", (t) => {
   assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock")), []);
 });
 
+test("a fresh lock that replaced the stale one before the rename is put back, not broken", (t) => {
+  const dir = tempDir(t);
+  const lock = join(dir, "desk.lock");
+  let raced = false;
+  const store = new S.DeskStore(dir, {
+    lockTimeoutMs: 300,
+    beforeBreakRename: () => {
+      if (raced) return;
+      raced = true;
+      writeFileSync(lock, "777:fresh"); // another process broke the stale lock and took a new one
+    },
+  });
+  store.ensureDir();
+  writeFileSync(lock, "999999:dead");
+  age(lock, 20_000);
+  assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/);
+  assert.equal(readFileSync(lock, "utf8"), "777:fresh");
+  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock.stale")), []);
+  assert.equal(events(dir).filter((e) => e.type === "stale_lock_broken").length, 0);
+});
+
 test("a fresh lock held by another process makes update time out", (t) => {
   const dir = tempDir(t);
   const store = new S.DeskStore(dir, { lockTimeoutMs: 200 });
@@ -479,14 +500,15 @@ test("old temp files and stale-lock leftovers are swept at start; fresh ones are
   const oldTmp = join(dir, "desk.json.1.aaa.tmp");
   const freshTmp = join(dir, "desk.json.2.bbb.tmp");
   const oldStale = join(dir, "desk.lock.stale.ccc");
-  for (const f of [oldTmp, freshTmp, oldStale]) writeFileSync(f, "x");
-  age(oldTmp, 2 * MIN);
-  age(oldStale, 2 * MIN);
+  const oldOther = [join(dir, "desk.json"), join(dir, "events.jsonl"), join(dir, "notes.tmp")];
+  for (const f of [oldTmp, freshTmp, oldStale, ...oldOther]) writeFileSync(f, "x");
+  for (const f of [oldTmp, oldStale, ...oldOther]) age(f, 2 * MIN);
   new S.DeskStore(dir).read();
   new S.DeskStore(dir).ensureDir();
   assert.ok(!existsSync(oldTmp));
   assert.ok(!existsSync(oldStale));
   assert.ok(existsSync(freshTmp));
+  for (const f of oldOther) assert.ok(existsSync(f), `${f} is not a leftover`);
 });
 
 // ---------- owner-only folder ----------

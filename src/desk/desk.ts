@@ -175,7 +175,7 @@ export class LaunchDesk {
         if (e.project_id !== req.projectId) {
           throw new Error(`Queue entry ${e.id} was granted for project ${untrusted(e.project)}; it cannot launch in another project.`);
         }
-        if (e.kind !== kind || e.target_thread_id !== target) {
+        if (e.target_thread_id !== target) { // create entries have no target; resume entries always do
           throw new Error(
             e.kind === "resume"
               ? `Queue entry ${e.id} is for send_message to thread ${e.target_thread_id}; use it only for that thread.`

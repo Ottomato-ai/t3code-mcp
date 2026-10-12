@@ -397,6 +397,8 @@ export interface DeskStoreOptions {
   icacls?: (args: string[]) => string;
   /** Owner principal as icacls prints it (default %USERDOMAIN%\%USERNAME%). */
   user?: string;
+  /** Tests only: runs between reading a stale lock and renaming it (simulates a racing process). */
+  beforeBreakRename?: () => void;
 }
 
 /** The shared desk.json under one lock file. Synchronous: each change takes milliseconds. */
@@ -409,6 +411,7 @@ export class DeskStore {
   private readonly platform: NodeJS.Platform;
   private readonly icacls: (args: string[]) => string;
   private readonly user: string;
+  private readonly beforeBreakRename: () => void;
   private loggedCorrupt = false;
 
   constructor(
@@ -421,6 +424,7 @@ export class DeskStore {
     this.lockTimeoutMs = opts.lockTimeoutMs ?? 5_000;
     this.staleLockMs = opts.staleLockMs ?? 15_000;
     this.platform = opts.platform ?? process.platform;
+    this.beforeBreakRename = opts.beforeBreakRename ?? (() => {});
     this.icacls =
       opts.icacls ?? ((args) => execFileSync("icacls", args, { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }));
     this.user =
@@ -558,6 +562,7 @@ export class DeskStore {
     }
     if (seen === null) return false;
     const aside = `${this.lockFile}.stale.${randomUUID()}`;
+    this.beforeBreakRename();
     try {
       renameSync(this.lockFile, aside);
     } catch {

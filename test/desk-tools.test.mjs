@@ -173,7 +173,7 @@ test("a retry after a dispatch failure does not launch a second thread", async (
   s.t3.dispatch = ok;
   const again = await s.call("create_thread", create("Lane A", { queue_entry: id }));
   assert.equal(again.isError, true);
-  assert.match(again.text, /failed/);
+  assert.match(again.text, /failed after the launch was sent/);
   assert.equal(creates(s.t3).length, 1);
 });
 
@@ -267,6 +267,27 @@ test("send_message to a stopped thread queues when full, then sends on its grant
   assert.equal(r.sent, true);
   assert.equal(entry(q.queue_entry).state, "launched");
   assert.equal(t3.state.dispatched.length, 1);
+});
+
+test("a failed restart marks the entry failed", async (t) => {
+  const { call, t3, store } = await setup(t, { cap: 2 });
+  t3.dispatch = async () => { throw new Error("T3 down"); };
+  const r = await call("send_message", { threadId: "th9", message: "wake up", lane: "Lane A" });
+  assert.equal(r.isError, true);
+  const e = store.read().entries[0];
+  assert.equal(e.state, "failed");
+  assert.equal(e.thread_id, "th9");
+});
+
+test("a resume grant cannot be used by create_thread", async (t) => {
+  const { call, t3, desk } = await setup(t, { cap: 1, running: ["x"] });
+  const q = await call("send_message", { threadId: "th9", message: "x", lane: "Lane A" });
+  t3.state.running = [];
+  await desk.tickOnce(t3);
+  const r = await call("create_thread", create("Lane A", { queue_entry: q.queue_entry }));
+  assert.equal(r.isError, true);
+  assert.match(r.text, /send_message to thread th9/);
+  assert.equal(t3.state.dispatched.length, 0);
 });
 
 test("a create grant cannot be used by send_message and the reverse", async (t) => {
@@ -524,6 +545,14 @@ test("tickOnce: a stopped thread frees a slot and the next entry is granted", as
   t3.state.running = [];
   await desk.tickOnce(t3);
   assert.equal(entry(a.queue_entry).state, "granted");
+});
+
+test("tickOnce expires a lone grant (nothing waiting)", async (t) => {
+  const s = await setup(t, { cap: 1 });
+  const id = await grantedEntry(s);
+  s.clock.now += 10 * 60_000;
+  await s.desk.tickOnce(s.t3);
+  assert.equal(s.entry(id).state, "expired");
 });
 
 test("tickOnce does not call T3 when nothing is waiting, granted or launching", async (t) => {
