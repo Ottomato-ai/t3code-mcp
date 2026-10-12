@@ -383,9 +383,8 @@ export function lockHolderDead(content: string | null): boolean {
   const m = /^(\d+):/.exec(content ?? "");
   if (!m) return false;
   const pid = Number(m[1]);
-  if (!(pid > 0)) return false;
   try {
-    process.kill(pid, 0);
+    process.kill(pid, 0); // pid 0 never gives ESRCH, so it reads as alive
     return false;
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "ESRCH";

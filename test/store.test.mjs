@@ -428,7 +428,7 @@ test("a lock whose holder is alive is not broken before 60 s, even when it is st
 
 test("a lock 60 s or older is broken even when its holder is alive", (t) => {
   const dir = tempDir(t);
-  const store = new S.DeskStore(dir);
+  const store = new S.DeskStore(dir, { lockTimeoutMs: 200 }); // short, so the lock cannot age past 61 s while waiting
   store.ensureDir();
   const lock = join(dir, "desk.lock");
   writeFileSync(lock, `${process.pid}:hung-holder`);

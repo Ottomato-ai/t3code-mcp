@@ -14,7 +14,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUT = process.argv[2];
 const FILTER = process.argv[3];
 const HB = join(process.env.USERPROFILE || process.env.HOME || ".", ".host-guard", "heartbeat.json");
-const TESTS = ["test/store.test.mjs", "test/memory.test.mjs", "test/desk-tools.test.mjs"];
+const TESTS = ["test/store.test.mjs", "test/memory.test.mjs", "test/desk-tools.test.mjs", "test/client.test.mjs"];
 
 const S = "dist/desk/store.js", D = "dist/desk/desk.js", M = "dist/desk/memory.js", R = "dist/desk/running.js";
 const T = "dist/tools/desk.js", P1 = "dist/tools/phase1.js", P2 = "dist/tools/phase2.js";
@@ -113,8 +113,7 @@ export const MUTANTS = [
   [S, `        return ageMs >= this.staleLockMs || lockHolderDead(content);`, `        return ageMs >= this.staleLockMs;`, "dead holder broken at once"],
   [S, `        return ageMs >= this.staleLockMs || lockHolderDead(content);`, `        return lockHolderDead(content);`, "old lock broken"],
   [S, `    if (!m)\n        return false;`, ``, "unparsable lock is not dead"],
-  [S, `    if (!(pid > 0))\n        return false;`, ``, "pid 0 is not dead"],
-  [S, `        process.kill(pid, 0);\n        return false;`, `        return false;`, "pid probed"],
+  [S, `        process.kill(pid, 0); // pid 0 never gives ESRCH, so it reads as alive\n        return false;`, `        return false;`, "pid probed"],
   [S, `        return e.code === "ESRCH";`, `        return true;`, "EPERM means alive"],
   [S, `            renameSync(path, aside);\n        }\n        catch {\n            return null;`, `            rmSync(path, { force: true });\n        }\n        catch {\n            return null;`, "removed by rename-aside"],
   [S, `            if (holder === null)\n                return false;`, ``, "lost rename not logged"],
@@ -129,7 +128,7 @@ export const MUTANTS = [
   [S, `        if (readText(this.lockFile) !== token) {`, `        if (false) {`, "write checks the token"],
   [S, `        if (readText(this.lockFile) !== token)\n            return;`, ``, "release only own lock"],
   [S, `            this.release(token);`, ``, "lock released"],
-  [S, `            trimHistory(state);\n            this.write(state);`, `            this.write(state);`, "update trims"],
+  [S, `            trimHistory(state);\n            this.write(state, token);`, `            this.write(state, token);`, "update trims"],
   // read
   [S, `                this.loggedCorrupt = false;`, ``, "corrupt log resets on good read"],
   [S, `        if (!this.loggedCorrupt) {`, `        if (true) {`, "corrupt logged once"],

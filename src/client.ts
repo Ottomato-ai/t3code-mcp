@@ -16,7 +16,7 @@ export function wasNotSent(e: unknown): boolean {
 }
 
 /** fetch rejects with a cause; connection refused (also inside an AggregateError) means not sent. */
-function refused(e: unknown): boolean {
+export function refused(e: unknown): boolean {
   const cause = (e as { cause?: { code?: string; errors?: Array<{ code?: string }> } })?.cause;
   if (!cause) return false;
   if (cause.code === "ECONNREFUSED") return true;
