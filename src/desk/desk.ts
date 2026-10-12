@@ -214,8 +214,18 @@ export class LaunchDesk {
     return result;
   }
 
+  /** Record the launch, then log it for Host Guard, which measures each launch's memory cost. */
   markLaunched(id: string, token: string, threadId: string): void {
-    this.store.update((state) => markLaunched(state, id, threadId, this.now(), token));
+    const e = this.store.update((state) => ({ ...markLaunched(state, id, threadId, this.now(), token) }));
+    this.store.logEvent({
+      type: "launched",
+      id: e.id,
+      lane: e.lane,
+      project: e.project,
+      thread_id: e.thread_id,
+      kind: e.kind,
+      launched_at: e.launched_at,
+    });
   }
 
   /** A claimed launch did not finish. The grant comes back only when nothing was sent to T3. */

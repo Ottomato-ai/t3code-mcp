@@ -244,6 +244,20 @@ export const MUTANTS = [
   [T, `        desk.launchFailed(id, claim, { createSent: out.sent, threadId: out.threadId });`, ``, "failLaunch releases"],
   [T, `    if (out.sent)\n        return err`, `    if (true)\n        return err`, "not-sent error says retry"],
   [T, `    if (out.sent)\n        return err`, `    if (false)\n        return err`, "sent error unchanged"],
+  // F-44: launch events for Host Guard
+  [D, `        const e = this.store.update((state) => ({ ...markLaunched(state, id, threadId, this.now(), token) }));`, `        const e = this.store.read().entries.find((x) => x.id === id);`, "F44 launch recorded before the event"],
+  [D, `        this.store.logEvent({\n            type: "launched",`, `        ({\n            type: "launched",`, "F44 launched event written"],
+  [D, `            type: "launched",`, `            type: "launch",`, "F44 launched type"],
+  [D, `            id: e.id,\n            lane: e.lane,`, `            lane: e.lane,`, "F44 launched id"],
+  [D, `            lane: e.lane,\n            project: e.project,`, `            project: e.project,`, "F44 launched lane"],
+  [D, `            project: e.project,\n            thread_id: e.thread_id,`, `            thread_id: e.thread_id,`, "F44 launched project"],
+  [D, `            thread_id: e.thread_id,\n            kind: e.kind,`, `            kind: e.kind,`, "F44 launched thread_id"],
+  [D, `            kind: e.kind,\n            launched_at: e.launched_at,`, `            launched_at: e.launched_at,`, "F44 launched kind"],
+  [D, `            launched_at: e.launched_at,\n        });`, `        });`, "F44 launched launched_at"],
+  [T, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });`, ``, "F44 warning event written"],
+  [T, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });`, `        desk.store.logEvent({ type: "launch_warning", thread_id: threadId });`, "F44 warning id"],
+  [T, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });`, `        desk.store.logEvent({ type: "launch_warning", id });`, "F44 warning thread_id"],
+  [T, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });`, `        desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId, extra: 1 });`, "F44 warning exact fields"],
 ];
 
 function commit() {
