@@ -188,6 +188,23 @@ test("moveBefore reorders waiting entries; moving ahead of a Ned entry makes it 
   assert.equal(b.priority, "ned");
 });
 
+test("moveBefore ahead of a normal entry that sits right after a Ned entry", () => {
+  const st = S.emptyState();
+  add(st, "A", "normal", T0);
+  add(st, "N", "ned", T0 + 3000);
+  const c = add(st, "C", "normal", T0 + 5000);
+  S.moveBefore(st, c.id, st.entries[0].id);
+  assert.deepEqual(S.orderedWaiting(st).map((e) => e.lane), ["N", "C", "A"]);
+});
+
+test("lockBusy: EEXIST and EPERM mean busy, other errors do not", () => {
+  assert.equal(S.lockBusy("EEXIST"), true);
+  assert.equal(S.lockBusy("EPERM"), true);
+  assert.equal(S.lockBusy("ENOENT"), false);
+  assert.equal(S.lockBusy("EACCES"), false);
+  assert.equal(S.lockBusy(undefined), false);
+});
+
 test("moveBefore refuses entries that are not waiting", () => {
   const st = S.emptyState();
   const a = add(st, "A");
@@ -282,6 +299,15 @@ test("a fresh lock held by another process makes update time out", (t) => {
   writeFileSync(join(dir, "desk.lock"), "999999");
   assert.throws(() => store.update((st) => add(st, "A")), /lock/i);
   assert.ok(existsSync(join(dir, "desk.lock")), "someone else's lock is not removed");
+});
+
+test("an error other than a busy lock fails at once, not after the lock timeout", (t) => {
+  const file = join(tempDir(t), "not-a-dir");
+  writeFileSync(file, "x");
+  const store = new S.DeskStore(file, { lockTimeoutMs: 3000 });
+  const started = Date.now();
+  assert.throws(() => store.update(() => {}), (e) => !/could not take the lock/.test(e.message));
+  assert.ok(Date.now() - started < 1000);
 });
 
 test("the lock is released when the update function throws", (t) => {

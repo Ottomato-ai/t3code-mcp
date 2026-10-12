@@ -43,7 +43,6 @@ export function registerLaunchDesk(server: McpServer, getClient: () => T3Client,
       try {
         const desk = getDesk();
         const deadline = Date.now() + (args.timeout_seconds ?? 120) * 1000;
-        desk.status(args.queue_entry); // unknown id: error at once
         for (;;) {
           await desk.tickOnce(getClient());
           const { entry, position } = desk.status(args.queue_entry);

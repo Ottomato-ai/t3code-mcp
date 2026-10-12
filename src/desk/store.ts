@@ -221,6 +221,11 @@ function isDeskState(v: unknown): v is DeskState {
   );
 }
 
+/** Lock-open errors that mean "someone holds the lock": EEXIST, or EPERM on Windows while the previous lock file is still being deleted. */
+export function lockBusy(code: string | undefined): boolean {
+  return code === "EEXIST" || code === "EPERM";
+}
+
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 export interface DeskStoreOptions {
@@ -309,9 +314,7 @@ export class DeskStore {
         closeSync(fd);
         return;
       } catch (e) {
-        // EPERM on Windows: the previous lock file is still being deleted.
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST" && code !== "EPERM") throw e;
+        if (!lockBusy((e as NodeJS.ErrnoException).code)) throw e;
       }
       try {
         if (Date.now() - statSync(this.lockFile).mtimeMs > this.staleLockMs) {
@@ -320,7 +323,7 @@ export class DeskStore {
           continue;
         }
       } catch {
-        continue; // lock vanished between open and stat: try again
+        // lock vanished (or is being deleted) between open and stat: retry after the deadline check
       }
       if (Date.now() >= deadline) {
         throw new Error(`launch-desk: could not take the lock ${this.lockFile} within ${this.lockTimeoutMs} ms.`);
