@@ -421,8 +421,8 @@ test("a fresh lock that replaced the stale one before the rename is put back, no
   let raced = false;
   const store = new S.DeskStore(dir, {
     lockTimeoutMs: 300,
-    beforeBreakRename: () => {
-      if (raced) return;
+    testHook: (stage) => {
+      if (raced || stage !== "rename") return;
       raced = true;
       writeFileSync(lock, "777:fresh"); // another process broke the stale lock and took a new one
     },
@@ -436,13 +436,60 @@ test("a fresh lock that replaced the stale one before the rename is put back, no
   assert.equal(events(dir).filter((e) => e.type === "stale_lock_broken").length, 0);
 });
 
+test("inside the break guard the lock is checked again: a lock taken meanwhile is not broken", (t) => {
+  const dir = tempDir(t);
+  const lock = join(dir, "desk.lock");
+  const store = new S.DeskStore(dir, {
+    lockTimeoutMs: 300,
+    testHook: (stage) => {
+      if (stage === "guard") writeFileSync(lock, "888:new-holder"); // broken and re-taken by another process
+    },
+  });
+  store.ensureDir();
+  writeFileSync(lock, "999999:dead");
+  age(lock, 20_000);
+  assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/);
+  assert.equal(readFileSync(lock, "utf8"), "888:new-holder");
+  assert.equal(events(dir).filter((e) => e.type === "stale_lock_broken").length, 0);
+});
+
+test("while another process holds the break guard, the stale lock is left to it", (t) => {
+  const dir = tempDir(t);
+  const store = new S.DeskStore(dir, { lockTimeoutMs: 300 });
+  store.ensureDir();
+  const lock = join(dir, "desk.lock");
+  writeFileSync(lock, "999999:dead");
+  age(lock, 20_000);
+  writeFileSync(join(dir, "desk.lock.break"), "");
+  assert.throws(() => store.update((st) => add(st, "A")), /could not take the lock/);
+  assert.equal(readFileSync(lock, "utf8"), "999999:dead");
+  assert.ok(existsSync(join(dir, "desk.lock.break")), "a fresh guard is not removed");
+});
+
+test("a break guard left by a breaker that died is cleared", (t) => {
+  const dir = tempDir(t);
+  const store = new S.DeskStore(dir);
+  store.ensureDir();
+  const lock = join(dir, "desk.lock");
+  writeFileSync(lock, "999999:dead");
+  age(lock, 20_000);
+  const guard = join(dir, "desk.lock.break");
+  writeFileSync(guard, "");
+  age(guard, 20_000);
+  store.update((st) => add(st, "A"));
+  assert.equal(store.read().entries.length, 1);
+  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("desk.lock")), []);
+});
+
 test("a fresh lock held by another process makes update time out", (t) => {
   const dir = tempDir(t);
-  const store = new S.DeskStore(dir, { lockTimeoutMs: 200 });
+  let guards = 0;
+  const store = new S.DeskStore(dir, { lockTimeoutMs: 200, testHook: (stage) => { if (stage === "guard") guards++; } });
   store.ensureDir();
   writeFileSync(join(dir, "desk.lock"), "999999:other");
   assert.throws(() => store.update((st) => add(st, "A")), /lock/i);
   assert.equal(readFileSync(join(dir, "desk.lock"), "utf8"), "999999:other");
+  assert.equal(guards, 0, "a fresh lock does not take the break guard");
 });
 
 test("the lock file holds pid:token", (t) => {
@@ -522,12 +569,22 @@ test("the desk folder is created owner-only (no inherited access)", { skip: proc
   assert.doesNotMatch(acl, /BUILTIN\\Users|Everyone|BUILTIN\\Administrators|Authenticated Users/i, acl);
 });
 
-test("an existing folder with inherited access is made owner-only", { skip: process.platform !== "win32" }, (t) => {
-  const dir = join(tempDir(t), "launch-desk");
+test("an existing folder with inherited and explicit access is made owner-only", { skip: process.platform !== "win32" }, (t) => {
+  // Build the inherited state here instead of relying on the temp folder ACL of the machine:
+  // the parent grants BUILTIN\Users read with (OI)(CI), so the child inherits it as (I).
+  const parent = join(tempDir(t), "parent");
+  mkdirSync(parent);
+  execFileSync("icacls", [parent, "/inheritance:e", "/grant", "*S-1-5-32-545:(OI)(CI)R"], { stdio: "ignore" });
+  const dir = join(parent, "launch-desk");
   mkdirSync(dir);
-  assert.match(execFileSync("icacls", [dir], { encoding: "utf8" }), /\(I\)/);
+  execFileSync("icacls", [dir, "/grant", "*S-1-5-32-544:(OI)(CI)R"], { stdio: "ignore" }); // explicit BUILTIN\Administrators
+  const before = execFileSync("icacls", [dir], { encoding: "utf8" });
+  assert.match(before, /BUILTIN\\Users:\(I\)/, before);
+  assert.match(before, /BUILTIN\\Administrators:\(OI\)/, before);
   new S.DeskStore(dir).ensureDir();
-  assert.doesNotMatch(execFileSync("icacls", [dir], { encoding: "utf8" }), /\(I\)/);
+  const acl = execFileSync("icacls", [dir], { encoding: "utf8" });
+  assert.doesNotMatch(acl, /\(I\)|BUILTIN\\Users|BUILTIN\\Administrators/, acl);
+  assert.match(acl, new RegExp(process.env.USERNAME, "i"));
 });
 
 test("aclIsOwnerOnly reads icacls output", () => {
@@ -537,6 +594,8 @@ test("aclIsOwnerOnly reads icacls output", () => {
   assert.equal(S.aclIsOwnerOnly(inheritedAcl(dir), dir, "TESTDOMAIN\\tester"), false);
   assert.equal(S.aclIsOwnerOnly(ownerOnlyAcl(dir, "TESTDOMAIN\\intruder"), dir, "TESTDOMAIN\\tester"), false);
   assert.equal(S.aclIsOwnerOnly("", dir, "TESTDOMAIN\\tester"), false, "no entries is not owner-only");
+  const inheritedOwner = `${dir} NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\n  TESTDOMAIN\\tester:(OI)(CI)(F)\n`;
+  assert.equal(S.aclIsOwnerOnly(inheritedOwner, dir, "TESTDOMAIN\\tester"), false, "inherited even for an allowed principal");
 });
 
 test("ACL: verified once per process; re-applied when not owner-only", (t) => {

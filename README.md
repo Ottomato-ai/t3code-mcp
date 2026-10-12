@@ -48,6 +48,8 @@ Every thread carries a single `attention` state: `needs-approval | needs-input |
 
 ## Launch desk
 
+Scope: the launch desk is for this machine only (Ned's PC). It is not part of the OttoSystems server (bare-metal) build; it may be adapted for that later.
+
 At most `T3_LAUNCH_CAP` (default 15) T3 threads run at once across every lane on the machine. A thread counts while its session is `running`, `ready` or `starting` and it is not archived; the count is read from T3 at decision time. Ned's own launches in the T3 window are not gated but count toward the cap.
 
 - `create_thread` needs `lane` (the caller's exact session title). With a free slot and nobody waiting ahead it launches at once. Otherwise it answers `queued` with `queue_entry`, `position`, `running` and `cap`, and does not launch.

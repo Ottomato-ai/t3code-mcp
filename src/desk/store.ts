@@ -319,7 +319,6 @@ function validEntry(e: unknown): boolean {
     strOrNull(x.granted_at) &&
     strOrNull(x.grant_expires_at) &&
     strOrNull(x.thread_id) &&
-    typeof x.sort_key === "number" &&
     Number.isFinite(x.sort_key)
   );
 }
@@ -397,8 +396,8 @@ export interface DeskStoreOptions {
   icacls?: (args: string[]) => string;
   /** Owner principal as icacls prints it (default %USERDOMAIN%\%USERNAME%). */
   user?: string;
-  /** Tests only: runs between reading a stale lock and renaming it (simulates a racing process). */
-  beforeBreakRename?: () => void;
+  /** Tests only: called inside stale-lock breaking ("guard": guard taken; "rename": before the rename). */
+  testHook?: (stage: "guard" | "rename") => void;
 }
 
 /** The shared desk.json under one lock file. Synchronous: each change takes milliseconds. */
@@ -411,7 +410,7 @@ export class DeskStore {
   private readonly platform: NodeJS.Platform;
   private readonly icacls: (args: string[]) => string;
   private readonly user: string;
-  private readonly beforeBreakRename: () => void;
+  private readonly testHook: (stage: "guard" | "rename") => void;
   private loggedCorrupt = false;
 
   constructor(
@@ -424,7 +423,7 @@ export class DeskStore {
     this.lockTimeoutMs = opts.lockTimeoutMs ?? 5_000;
     this.staleLockMs = opts.staleLockMs ?? 15_000;
     this.platform = opts.platform ?? process.platform;
-    this.beforeBreakRename = opts.beforeBreakRename ?? (() => {});
+    this.testHook = opts.testHook ?? (() => {});
     this.icacls =
       opts.icacls ?? ((args) => execFileSync("icacls", args, { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }));
     this.user =
@@ -547,40 +546,59 @@ export class DeskStore {
     }
   }
 
+  /** True when the file exists and is older than staleLockMs. */
+  private isStale(path: string): boolean {
+    try {
+      return Date.now() - statSync(path).mtimeMs > this.staleLockMs;
+    } catch {
+      return false; // gone or being deleted
+    }
+  }
+
   /**
-   * Break a lock older than staleLockMs by renaming it to a unique name: only one process
-   * wins the rename. If what was renamed is not the stale lock that was seen (a fresh lock
-   * took its place), it is put back. Returns true when this process broke the lock.
+   * Break a lock older than staleLockMs. One breaker at a time holds `desk.lock.break`
+   * (a breaker that died leaves it stale, and it is cleared). Inside the guard the lock is
+   * checked again and renamed to a unique name, so only one process wins the rename. If
+   * what was renamed is not the stale lock that was seen (a fresh lock took its place), it
+   * is put back. Returns true when this process broke the lock.
    */
   private breakIfStale(): boolean {
-    let seen: string | null;
+    if (!this.isStale(this.lockFile)) return false;
+    const guard = `${this.lockFile}.break`;
     try {
-      if (Date.now() - statSync(this.lockFile).mtimeMs <= this.staleLockMs) return false;
-      seen = readText(this.lockFile);
+      closeSync(openSync(guard, "wx"));
     } catch {
-      return false; // gone or being deleted: just retry
+      if (this.isStale(guard)) rmSync(guard, { force: true }); // left by a breaker that died
+      return false; // another process is breaking it
     }
-    if (seen === null) return false;
-    const aside = `${this.lockFile}.stale.${randomUUID()}`;
-    this.beforeBreakRename();
     try {
-      renameSync(this.lockFile, aside);
-    } catch {
-      return false; // another process won the rename
-    }
-    const got = readText(aside);
-    if (got !== seen) {
+      this.testHook("guard");
+      if (!this.isStale(this.lockFile)) return false; // already broken and taken again
+      const seen = readText(this.lockFile);
+      if (seen === null) return false;
+      const aside = `${this.lockFile}.stale.${randomUUID()}`;
+      this.testHook("rename");
       try {
-        linkSync(aside, this.lockFile); // a fresh lock was renamed: put it back unless the name is taken
+        renameSync(this.lockFile, aside);
       } catch {
-        /* someone already holds a new lock */
+        return false;
+      }
+      const got = readText(aside);
+      if (got !== seen) {
+        try {
+          linkSync(aside, this.lockFile); // a fresh lock was renamed: put it back unless the name is taken
+        } catch {
+          /* someone already holds a new lock */
+        }
+        rmSync(aside, { force: true });
+        return false;
       }
       rmSync(aside, { force: true });
-      return false;
+      this.logEvent({ type: "stale_lock_broken", holder: seen });
+      return true;
+    } finally {
+      rmSync(guard, { force: true });
     }
-    rmSync(aside, { force: true });
-    this.logEvent({ type: "stale_lock_broken", holder: seen });
-    return true;
   }
 
   /** Delete the lock only while it still holds this holder's token. */

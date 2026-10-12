@@ -18,6 +18,7 @@ const TESTS = ["test/store.test.mjs", "test/memory.test.mjs", "test/desk-tools.t
 
 const S = "dist/desk/store.js", D = "dist/desk/desk.js", M = "dist/desk/memory.js", R = "dist/desk/running.js";
 const T = "dist/tools/desk.js", P1 = "dist/tools/phase1.js", P2 = "dist/tools/phase2.js";
+const U = "dist/desk/untrusted.js";
 
 // [file, exact text (must occur once), replacement, label]
 export const MUTANTS = [
@@ -94,7 +95,7 @@ export const MUTANTS = [
   [S, `        STATES.includes(x.state) &&`, `        true &&`, "valid state"],
   [S, `        isTime(x.created_at) &&`, `        true &&`, "valid created_at"],
   [S, `        isTime(x.updated_at) &&`, `        true &&`, "valid updated_at"],
-  [S, `        typeof x.sort_key === "number" &&`, `        true &&`, "valid sort_key"],
+  [S, `        Number.isFinite(x.sort_key));`, `        true);`, "valid sort_key"],
   [S, `const isTime = (v) => isStr(v) && Number.isFinite(Date.parse(v));`, `const isTime = (v) => isStr(v);`, "valid time parse"],
   [S, `    if (!e || typeof e !== "object")\n        return false;\n    const x = e;`, `    const x = e;`, "valid entry object"],
   [S, `    return (s.version === 1 &&`, `    return (true &&`, "valid version"],
@@ -106,8 +107,13 @@ export const MUTANTS = [
   [S, `                if (!lockBusy(e.code))\n                    throw e;`, ``, "acquire rethrows other errors"],
   [S, `        const token = \`\${process.pid}:\${randomUUID()}\`;`, `        const token = "x";`, "lock token pid:uuid"],
   [S, `            if (this.breakIfStale())\n                continue;`, ``, "stale lock broken"],
-  [S, `<= this.staleLockMs)\n                return false;`, `>= 0)\n                return false;`, "stale bound used"],
-  [S, `            if (Date.now() - statSync(this.lockFile).mtimeMs <= this.staleLockMs)`, `            if (Date.now() - statSync(this.lockFile).mtimeMs < 0)`, "only stale locks broken"],
+  [S, `            return Date.now() - statSync(path).mtimeMs > this.staleLockMs;`, `            return Date.now() - statSync(path).mtimeMs >= 0;`, "only stale locks broken"],
+  [S, `            return Date.now() - statSync(path).mtimeMs > this.staleLockMs;`, `            return false;`, "stale locks are broken"],
+  [S, `        if (!this.isStale(this.lockFile))\n            return false;\n        const guard`, `        const guard`, "fresh lock takes no guard"],
+  [S, `            if (this.isStale(guard))\n                rmSync(guard, { force: true });`, ``, "dead breaker guard cleared"],
+  [S, `            return false; // another process is breaking it`, ``, "one breaker at a time"],
+  [S, `            if (!this.isStale(this.lockFile))\n                return false; // already broken and taken again`, ``, "lock checked again inside guard"],
+  [S, `        finally {\n            rmSync(guard, { force: true });`, `        finally {\n            ;`, "guard released"],
   [S, `        if (got !== seen) {`, `        if (false) {`, "fresh lock put back"],
   [S, `                linkSync(aside, this.lockFile);`, ``, "put back links"],
   [S, `        this.logEvent({ type: "stale_lock_broken", holder: seen });`, ``, "stale break logged"],
@@ -190,7 +196,7 @@ export const MUTANTS = [
   [D, `belongs to lane \${untrusted(e.lane)}, not`, `belongs to lane \${e.lane}, not`, "lane untrusted in error"],
   [D, `belongs to lane \${untrusted(e.lane)}; a lane`, `belongs to lane \${e.lane}; a lane`, "cancel lane untrusted in error"],
   // tools
-  [T, `.replace(/</g, "&lt;").replace(/>/g, "&gt;")`, ``, "untrusted escape"],
+  [U, `.replace(/</g, "&lt;").replace(/>/g, "&gt;")`, ``, "untrusted escape"],
   [T, `                if (entry.state !== "waiting") {`, `                if (entry.state === "expired") {`, "wait returns on grant"],
   [T, `                if (Date.now() >= deadline) {`, `                if (Date.now() >= deadline + 60000) {`, "wait timeout"],
   [T, `                await desk.maybeTick(getClient());`, `                await desk.tickOnce(getClient());`, "wait uses throttled tick"],
