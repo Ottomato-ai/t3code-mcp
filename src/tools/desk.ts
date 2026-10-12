@@ -34,6 +34,7 @@ export function recordLaunch(desk: LaunchDesk, id: string, claim: string, thread
     return undefined;
   } catch (e) {
     console.error(`launch-desk: launched thread ${threadId} but could not record entry ${id}: ${message(e)}`);
+    desk.store.logEvent({ type: "launch_warning", id, thread_id: threadId });
     return (
       `Launched, but the launch desk could not record it (${message(e)}). Do not retry: the thread ` +
       `is running. The entry stays launching and is failed after 5 minutes.`
