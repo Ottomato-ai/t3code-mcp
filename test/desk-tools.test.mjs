@@ -213,6 +213,23 @@ test("a connection refused on an immediate launch keeps its grant for a retry wi
   assert.match(r.text, new RegExp(`queue_entry=${e.id}`));
 });
 
+test("a T3 error after the request was sent (not refused) marks the entry failed", async (t) => {
+  const { call, t3, store } = await setup(t, { cap: 1 });
+  t3.dispatch = async () => { throw new T3Error("socket hang up"); };
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.isError, true);
+  assert.doesNotMatch(r.text, /Nothing reached T3/);
+  assert.equal(store.read().entries[0].state, "failed");
+});
+
+test("send_message to a running thread passes a dispatch error through unchanged", async (t) => {
+  const { call, t3 } = await setup(t, { running: ["th1"] });
+  t3.dispatch = async () => { throw new Error("boom"); };
+  const r = await call("send_message", { threadId: "th1", message: "x" });
+  assert.equal(r.isError, true);
+  assert.equal(r.text, "Error: boom");
+});
+
 test("a failure after thread.create was sent (turn start fails) marks the entry failed", async (t) => {
   const { call, t3, store } = await setup(t, { cap: 1 });
   const ok = t3.dispatch;

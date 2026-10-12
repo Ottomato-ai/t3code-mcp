@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { T3Client } from "../client.js";
+import { wasNotSent, type T3Client } from "../client.js";
 import { attentionOf, newId, nowIso, pendingRequests } from "../model.js";
 import type { Attention } from "../model.js";
 import {
@@ -13,7 +13,7 @@ import {
 } from "../format.js";
 import type { LaunchDesk } from "../desk/desk.js";
 import { LIVE_SESSION_STATES, runningThreadIds } from "../desk/running.js";
-import { queuedResult } from "./desk.js";
+import { failLaunch, queuedResult, recordLaunch } from "./desk.js";
 
 const ATTENTION_VALUES = [
   "needs-approval",
@@ -300,11 +300,12 @@ export function registerPhase1(
         try {
           result = await client.dispatch(command);
         } catch (e) {
-          gate?.desk.launchFailed(gate.id, gate.claim, { createSent: true, threadId: t.id });
-          throw e;
+          if (!gate) throw e;
+          throw failLaunch(gate.desk, gate.id, gate.claim, e, { sent: !wasNotSent(e), threadId: t.id, tool: "send_message" });
         }
-        gate?.desk.markLaunched(gate.id, gate.claim, t.id);
+        const warning = gate ? recordLaunch(gate.desk, gate.id, gate.claim, t.id) : undefined;
         return jsonResult({
+          ...(warning ? { warning } : {}),
           sent: true,
           threadId: t.id,
           threadTitle: t.title,

@@ -22,6 +22,48 @@ function grantedNote(e: DeskEntry): string {
   );
 }
 
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Record a launch that T3 accepted. A desk failure here must not turn the launch into an
+ * error (the caller would retry and start a second thread): it becomes a warning.
+ */
+export function recordLaunch(desk: LaunchDesk, id: string, claim: string, threadId: string): string | undefined {
+  try {
+    desk.markLaunched(id, claim, threadId);
+    return undefined;
+  } catch (e) {
+    console.error(`launch-desk: launched thread ${threadId} but could not record entry ${id}: ${message(e)}`);
+    return (
+      `Launched, but the launch desk could not record it (${message(e)}). Do not retry: the thread ` +
+      `is running. The entry stays launching and is failed after 5 minutes.`
+    );
+  }
+}
+
+/**
+ * A claimed launch failed. When nothing reached T3 (connection refused) the grant is kept and
+ * the error says how to retry; otherwise the entry is failed. Returns the error to throw.
+ */
+export function failLaunch(
+  desk: LaunchDesk,
+  id: string,
+  claim: string,
+  err: unknown,
+  out: { sent: boolean; threadId: string; tool: "create_thread" | "send_message" },
+): Error {
+  try {
+    desk.launchFailed(id, claim, { createSent: out.sent, threadId: out.threadId });
+  } catch (e) {
+    console.error(`launch-desk: could not release entry ${id}: ${message(e)}`);
+  }
+  if (out.sent) return err instanceof Error ? err : new Error(message(err));
+  return new Error(
+    `${message(err)} Nothing reached T3, so the grant is kept: call ${out.tool} again with ` +
+      `queue_entry=${id} and the same lane before the grant expires.`,
+  );
+}
+
 /** The answer for a launch that has to wait: no launch, the entry id and how to continue. */
 export function queuedResult(admission: Extract<Admission, { kind: "queued" }>, tool: "create_thread" | "send_message") {
   return jsonResult({

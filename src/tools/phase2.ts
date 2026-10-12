@@ -1,12 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { T3Client } from "../client.js";
+import { wasNotSent, type T3Client } from "../client.js";
 import { attentionOf, newId, nowIso, pendingRequests } from "../model.js";
 import type { ModelSelection, ThreadShell } from "../model.js";
 import { errorResult, jsonResult, messageRow, relTime, truncate } from "../format.js";
 import type { LaunchDesk } from "../desk/desk.js";
 import { runningThreadIds } from "../desk/running.js";
-import { queuedResult } from "./desk.js";
+import { failLaunch, queuedResult, recordLaunch } from "./desk.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -244,24 +244,30 @@ export function registerPhase2(
 
         const threadId = newId();
         let result: { sequence: number };
+        // Sent means the request may have reached T3; only a refused connection is "not sent".
         let createSent = false;
         try {
-          createSent = true;
           // The HTTP dispatch path has no bootstrap expansion (that lives in the
           // WS handler), so create the thread and start the turn as two commands.
-          await client.dispatch({
-            type: "thread.create",
-            commandId: newId(),
-            threadId,
-            projectId: project.id,
-            title,
-            modelSelection: selection,
-            runtimeMode,
-            interactionMode,
-            branch: null,
-            worktreePath: null,
-            createdAt: nowIso(),
-          });
+          try {
+            await client.dispatch({
+              type: "thread.create",
+              commandId: newId(),
+              threadId,
+              projectId: project.id,
+              title,
+              modelSelection: selection,
+              runtimeMode,
+              interactionMode,
+              branch: null,
+              worktreePath: null,
+              createdAt: nowIso(),
+            });
+          } catch (e) {
+            createSent = !wasNotSent(e);
+            throw e;
+          }
+          createSent = true;
           result = await client.dispatch({
             type: "thread.turn.start",
             commandId: newId(),
@@ -272,10 +278,13 @@ export function registerPhase2(
             createdAt: nowIso(),
           });
         } catch (e) {
-          desk.launchFailed(admission.entry.id, admission.claim, { createSent, threadId });
-          throw e;
+          throw failLaunch(desk, admission.entry.id, admission.claim, e, {
+            sent: createSent,
+            threadId,
+            tool: "create_thread",
+          });
         }
-        desk.markLaunched(admission.entry.id, admission.claim, threadId);
+        const warning = recordLaunch(desk, admission.entry.id, admission.claim, threadId);
         return jsonResult({
           created: true,
           threadId,
@@ -285,6 +294,7 @@ export function registerPhase2(
           runtimeMode,
           queue_entry: admission.entry.id,
           sequence: result.sequence,
+          ...(warning ? { warning } : {}),
           note: "Agent is starting. Use wait_for_turn to get the first reply. Stop the thread (stop_thread) when it is done.",
         });
       } catch (e) {

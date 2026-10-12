@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as S from "../dist/desk/store.js";
@@ -456,6 +456,25 @@ test("lockHolderDead: dead pid true; live, own, missing or garbage pid false", (
   assert.equal(S.lockHolderDead(`${process.pid}:x`), false);
   assert.equal(S.lockHolderDead(`${process.ppid}:x`), false);
   for (const v of [null, "", "x", ":x", "0:x", "-5:x", "12a:x"]) assert.equal(S.lockHolderDead(v), false, JSON.stringify(v));
+  if (process.platform === "win32") assert.equal(S.lockHolderDead("4:x"), false, "System (EPERM on signal 0) is alive");
+});
+
+test("a breaker that loses the rename to another process does not log a break", (t) => {
+  const dir = tempDir(t);
+  const lock = join(dir, "desk.lock");
+  let raced = false;
+  const store = new S.DeskStore(dir, {
+    testHook: (stage) => {
+      if (raced || stage !== "rename") return;
+      raced = true;
+      rmSync(lock, { force: true }); // another process removed it first
+    },
+  });
+  store.ensureDir();
+  writeFileSync(lock, `${DEAD}:dead`);
+  store.update((st) => add(st, "A"));
+  assert.equal(store.read().entries.length, 1);
+  assert.equal(events(dir).filter((e) => e.type === "stale_lock_broken").length, 0);
 });
 
 test("a lock replaced during the break is not put back; nothing is left behind", (t) => {

@@ -1,7 +1,27 @@
 import { discoverOrigin, loadToken, ConfigError } from "./config.js";
 import type { ShellSnapshot, ThreadDetailSnapshot } from "./model.js";
 
-export class T3Error extends Error {}
+export class T3Error extends Error {
+  /** True when the request never reached the server (connection refused): nothing was sent. */
+  readonly notSent: boolean;
+  constructor(message: string, opts: { notSent?: boolean } = {}) {
+    super(message);
+    this.notSent = opts.notSent ?? false;
+  }
+}
+
+/** A dispatch that failed this way did not reach T3, so nothing can have started. */
+export function wasNotSent(e: unknown): boolean {
+  return e instanceof T3Error && e.notSent;
+}
+
+/** fetch rejects with a cause; connection refused (also inside an AggregateError) means not sent. */
+function refused(e: unknown): boolean {
+  const cause = (e as { cause?: { code?: string; errors?: Array<{ code?: string }> } })?.cause;
+  if (!cause) return false;
+  if (cause.code === "ECONNREFUSED") return true;
+  return Array.isArray(cause.errors) && cause.errors.length > 0 && cause.errors.every((x) => x?.code === "ECONNREFUSED");
+}
 
 export interface EnvironmentInfo {
   environmentId: string;
@@ -36,6 +56,7 @@ export class T3Client {
       throw new T3Error(
         `Could not reach the T3 Code server at ${this.origin} (${(e as Error).message}). ` +
           `Is T3 Code running? Start the desktop app or \`npx t3@latest\`.`,
+        { notSent: refused(e) },
       );
     }
     if (res.status === 401 || res.status === 403) {

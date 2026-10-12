@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { T3Client, T3Error } from "../dist/client.js";
+import { T3Client, T3Error, wasNotSent } from "../dist/client.js";
 
 const listen = (server) => new Promise((r) => server.listen(0, "127.0.0.1", () => r(server.address().port)));
 const close = (server) => new Promise((r) => server.close(() => r()));
@@ -29,4 +29,19 @@ test("an HTTP error answer is not notSent", async (t) => {
   t.after(() => close(server));
   const client = new T3Client(`http://127.0.0.1:${port}`, "tok");
   await assert.rejects(client.dispatch({ type: "x" }), (e) => e instanceof T3Error && e.notSent === false);
+});
+
+test("connection refused on localhost (IPv6 and IPv4 tried): notSent true", async () => {
+  const server = createServer();
+  const port = await listen(server);
+  await close(server);
+  const client = new T3Client(`http://localhost:${port}`, "tok");
+  await assert.rejects(client.dispatch({ type: "x" }), (e) => e instanceof T3Error && e.notSent === true);
+});
+
+test("wasNotSent: only a T3Error marked notSent", () => {
+  assert.equal(wasNotSent(new T3Error("x", { notSent: true })), true);
+  assert.equal(wasNotSent(new T3Error("x")), false);
+  assert.equal(wasNotSent(Object.assign(new Error("x"), { notSent: true })), false);
+  assert.equal(wasNotSent(undefined), false);
 });

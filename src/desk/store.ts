@@ -8,7 +8,6 @@ import {
   copyFileSync,
   existsSync,
   fsyncSync,
-  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -83,6 +82,8 @@ export const RECENT_LAUNCH_MS = 2 * 60_000;
 export const CLAIM_TTL_MS = 5 * 60_000;
 /** Leftover temp and stale-lock files older than this are swept at start. */
 export const SWEEP_AGE_MS = 60_000;
+/** A lock whose holder is alive is broken only at this age (a stalled holder keeps it until then). */
+export const STALE_LOCK_MS = 60_000;
 
 const iso = (ms: number) => new Date(ms).toISOString();
 /** Entries that are never trimmed and that block a slot or the queue. */
@@ -374,6 +375,23 @@ function otherPrincipals(output: string, dir: string, user: string): string[] {
   return out;
 }
 
+/**
+ * True only when the lock content names a pid (pid:token) and that process does not exist.
+ * Missing, half-written or unparsable content, or a live pid (also this process): false.
+ */
+export function lockHolderDead(content: string | null): boolean {
+  const m = /^(\d+):/.exec(content ?? "");
+  if (!m) return false;
+  const pid = Number(m[1]);
+  if (!(pid > 0)) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 function readText(path: string): string | null {
@@ -421,7 +439,7 @@ export class DeskStore {
     this.lockFile = join(dir, "desk.lock");
     this.eventsFile = join(dir, "events.jsonl");
     this.lockTimeoutMs = opts.lockTimeoutMs ?? 5_000;
-    this.staleLockMs = opts.staleLockMs ?? 15_000;
+    this.staleLockMs = opts.staleLockMs ?? STALE_LOCK_MS;
     this.platform = opts.platform ?? process.platform;
     this.testHook = opts.testHook ?? (() => {});
     this.icacls =
@@ -546,58 +564,68 @@ export class DeskStore {
     }
   }
 
-  /** True when the file exists and is older than staleLockMs. */
-  private isStale(path: string): boolean {
+  /**
+   * A lock (or break guard) may be broken when its holder process is dead, or when it is
+   * staleLockMs (60 s) or older. Age alone below that is not enough: a live holder may be
+   * stalled (paging under memory pressure) and must keep its lock.
+   */
+  private breakable(path: string): boolean {
+    const content = readText(path);
+    if (content === null) return false;
+    let ageMs: number;
     try {
-      return Date.now() - statSync(path).mtimeMs > this.staleLockMs;
+      ageMs = Date.now() - statSync(path).mtimeMs;
     } catch {
       return false; // gone or being deleted
     }
+    return ageMs >= this.staleLockMs || lockHolderDead(content);
+  }
+
+  /** Remove a file by renaming it to a unique name first: only one process wins the rename. */
+  private removeAside(path: string): string | null {
+    const aside = `${this.lockFile}.stale.${randomUUID()}`;
+    try {
+      renameSync(path, aside);
+    } catch {
+      return null; // another process won, or it is gone
+    }
+    const content = readText(aside);
+    rmSync(aside, { force: true });
+    return content;
   }
 
   /**
-   * Break a lock older than staleLockMs. One breaker at a time holds `desk.lock.break`
-   * (a breaker that died leaves it stale, and it is cleared). Inside the guard the lock is
-   * checked again and renamed to a unique name, so only one process wins the rename. If
-   * what was renamed is not the stale lock that was seen (a fresh lock took its place), it
-   * is put back. Returns true when this process broke the lock.
+   * Break a lock whose holder is dead or that is 60 s or older. One breaker at a time holds
+   * `desk.lock.break` (pid:uuid; a guard whose breaker died is removed by rename-aside).
+   * Inside the guard the lock is checked again, then renamed aside: only one process wins.
+   * Nothing is ever put back; a holder that lost its lock cannot write (see write()).
+   * Returns true when this process broke the lock.
    */
   private breakIfStale(): boolean {
-    if (!this.isStale(this.lockFile)) return false;
+    if (!this.breakable(this.lockFile)) return false;
     const guard = `${this.lockFile}.break`;
+    const guardToken = `${process.pid}:${randomUUID()}`;
     try {
-      closeSync(openSync(guard, "wx"));
+      const fd = openSync(guard, "wx");
+      try {
+        writeSync(fd, guardToken);
+      } finally {
+        closeSync(fd);
+      }
     } catch {
-      if (this.isStale(guard)) rmSync(guard, { force: true }); // left by a breaker that died
+      if (this.breakable(guard)) this.removeAside(guard); // left by a breaker that died or hung
       return false; // another process is breaking it
     }
     try {
       this.testHook("guard");
-      if (!this.isStale(this.lockFile)) return false; // already broken and taken again
-      const seen = readText(this.lockFile);
-      if (seen === null) return false;
-      const aside = `${this.lockFile}.stale.${randomUUID()}`;
+      if (!this.breakable(this.lockFile)) return false; // already broken and taken again
       this.testHook("rename");
-      try {
-        renameSync(this.lockFile, aside);
-      } catch {
-        return false;
-      }
-      const got = readText(aside);
-      if (got !== seen) {
-        try {
-          linkSync(aside, this.lockFile); // a fresh lock was renamed: put it back unless the name is taken
-        } catch {
-          /* someone already holds a new lock */
-        }
-        rmSync(aside, { force: true });
-        return false;
-      }
-      rmSync(aside, { force: true });
-      this.logEvent({ type: "stale_lock_broken", holder: seen });
+      const holder = this.removeAside(this.lockFile);
+      if (holder === null) return false;
+      this.logEvent({ type: "stale_lock_broken", holder });
       return true;
     } finally {
-      rmSync(guard, { force: true });
+      if (readText(guard) === guardToken) rmSync(guard, { force: true });
     }
   }
 
@@ -607,7 +635,8 @@ export class DeskStore {
     rmSync(this.lockFile, { force: true });
   }
 
-  private write(state: DeskState): void {
+  /** Write the whole file; refuse (and keep desk.json) when the lock is no longer this holder's. */
+  private write(state: DeskState, token: string): void {
     const tmp = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     const fd = openSync(tmp, "w");
     try {
@@ -615,6 +644,10 @@ export class DeskStore {
       fsyncSync(fd);
     } finally {
       closeSync(fd);
+    }
+    if (readText(this.lockFile) !== token) {
+      rmSync(tmp, { force: true });
+      throw new Error(`launch-desk: lost the lock ${this.lockFile} before writing; this change was not saved.`);
     }
     for (let attempt = 0; ; attempt++) {
       try {
@@ -639,7 +672,7 @@ export class DeskStore {
       const state = this.read();
       const result = fn(state);
       trimHistory(state);
-      this.write(state);
+      this.write(state, token);
       return result;
     } finally {
       this.release(token);
