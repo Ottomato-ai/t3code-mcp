@@ -54,6 +54,8 @@ export interface DeskEntry {
   /** Token of the launch in progress (state launching). */
   claim?: string | null;
   claimed_at?: string | null;
+  /** Granted beyond the base cap on Host Guard's allowedExtra (phase 2). */
+  extra?: boolean;
 }
 
 export interface DeskState {
@@ -61,6 +63,10 @@ export interface DeskState {
   /** Counter for sort keys; only goes up. */
   seq: number;
   entries: DeskEntry[];
+  /** Last extra grant or launch: no further extra until a newer headroom record (phase 2). */
+  last_extra_at?: string | null;
+  /** Last effective cap logged (a cap event is logged only when it changes). */
+  cap_effective?: number | null;
 }
 
 export interface SlotContext {
@@ -70,6 +76,10 @@ export interface SlotContext {
   commitPercent: number | null;
   nowMs: number;
   grantWindowMs?: number;
+  /** Phase 2: grants at or above this many used slots are extra. */
+  baseCap?: number;
+  /** Phase 2: extra grants allowed in this pass (default 0 when baseCap is set). */
+  extraGrants?: number;
 }
 
 export const GRANT_WINDOW_MS = 10 * 60_000;
@@ -190,8 +200,16 @@ export function grantNext(state: DeskState, ctx: SlotContext): DeskEntry[] {
   const granted: DeskEntry[] = [];
   if (!memoryAllowsGrant(ctx.commitPercent)) return granted;
   let used = slotsUsed(state, ctx);
+  let extraGiven = 0;
   for (const e of orderedWaiting(state)) {
     if (used >= ctx.cap) break;
+    const isExtra = ctx.baseCap !== undefined && used >= ctx.baseCap;
+    if (isExtra && extraGiven >= (ctx.extraGrants ?? 0)) break;
+    if (isExtra) {
+      e.extra = true;
+      state.last_extra_at = iso(ctx.nowMs);
+      extraGiven++;
+    }
     e.state = "granted";
     e.granted_at = iso(ctx.nowMs);
     e.grant_expires_at = iso(ctx.nowMs + (ctx.grantWindowMs ?? GRANT_WINDOW_MS));
@@ -239,6 +257,7 @@ export function markLaunched(state: DeskState, id: string, threadId: string, now
   e.launched_at = iso(nowMs);
   e.updated_at = iso(nowMs);
   e.claim = null;
+  if (e.extra) state.last_extra_at = e.launched_at;
   return e;
 }
 
@@ -320,7 +339,8 @@ function validEntry(e: unknown): boolean {
     strOrNull(x.granted_at) &&
     strOrNull(x.grant_expires_at) &&
     strOrNull(x.thread_id) &&
-    Number.isFinite(x.sort_key)
+    Number.isFinite(x.sort_key) &&
+    (x.extra === undefined || typeof x.extra === "boolean")
   );
 }
 
@@ -332,7 +352,9 @@ export function validState(v: unknown): v is DeskState {
     s.version === 1 &&
     (s.seq === undefined || (typeof s.seq === "number" && Number.isFinite(s.seq))) &&
     Array.isArray(s.entries) &&
-    s.entries.every(validEntry)
+    s.entries.every(validEntry) &&
+    (s.last_extra_at === undefined || s.last_extra_at === null || isTime(s.last_extra_at)) &&
+    (s.cap_effective === undefined || s.cap_effective === null || Number.isFinite(s.cap_effective))
   );
 }
 

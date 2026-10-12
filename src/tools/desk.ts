@@ -161,6 +161,17 @@ export function registerLaunchDesk(server: McpServer, getClient: () => T3Client,
         return jsonResult({
           running: v.running,
           cap: v.cap,
+          cap_base: v.capDecision.base,
+          cap_extra: v.capDecision.extra,
+          cap_reason: v.capDecision.reason,
+          headroom: v.headroom
+            ? {
+                status: v.headroom.status,
+                at: v.headroom.at === null ? null : new Date(v.headroom.at).toISOString(),
+                allowed_extra: v.headroom.allowedExtra,
+                measuring: v.headroom.measuring,
+              }
+            : null,
           free: v.free,
           memory: { status: v.memory.status, commitPercent: v.memory.commitPercent, blocks: v.memory.blocks },
           grants: v.grants.map((e) => ({ ...row(e), state: e.state, grant_expires_at: e.grant_expires_at })),
