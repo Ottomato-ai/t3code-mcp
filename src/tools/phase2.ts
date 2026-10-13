@@ -15,13 +15,28 @@ function needsHuman(t: ThreadShell): boolean {
   return a === "needs-approval" || a === "needs-input" || a === "plan-ready" || a === "error";
 }
 
+/**
+ * The option id T3 reads for reasoning effort differs per provider: Codex "reasoningEffort",
+ * Cursor "reasoning", Claude "effort". A wrong id is ignored and the provider runs on its
+ * default (low for Codex), so map by instance id.
+ */
+export function effortOptionId(instanceId: string): string {
+  if (instanceId.startsWith("codex")) return "reasoningEffort";
+  if (instanceId.startsWith("cursor")) return "reasoning";
+  return "effort";
+}
+
+const EFFORT_IDS = ["effort", "reasoningEffort", "reasoning"];
+
 /** Set the effort option on a model selection, keeping its other options. */
 export function withEffort(sel: ModelSelection, effort: string): ModelSelection {
+  const key = effortOptionId(sel.instanceId);
   if (sel.options !== undefined && !Array.isArray(sel.options)) {
-    return { ...sel, options: { ...sel.options, effort } };
+    const rest = Object.fromEntries(Object.entries(sel.options).filter(([k]) => !EFFORT_IDS.includes(k)));
+    return { ...sel, options: { ...rest, [key]: effort } };
   }
-  const others = (sel.options ?? []).filter((o) => o.id !== "effort");
-  return { ...sel, options: [...others, { id: "effort", value: effort }] };
+  const others = (sel.options ?? []).filter((o) => !EFFORT_IDS.includes(o.id));
+  return { ...sel, options: [...others, { id: key, value: effort }] };
 }
 
 export function registerPhase2(
