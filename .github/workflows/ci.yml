@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -17,13 +21,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Detect documentation-only changes
+        id: changes
+        uses: ./.github/actions/docs-only
       - uses: pnpm/action-setup@v4
+        if: steps.changes.outputs.docs-only != 'true'
         with:
           version: 10
       - uses: actions/setup-node@v4
+        if: steps.changes.outputs.docs-only != 'true'
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+        if: steps.changes.outputs.docs-only != 'true'
       - run: pnpm build
+        if: steps.changes.outputs.docs-only != 'true'
       - run: pnpm test
+        if: steps.changes.outputs.docs-only != 'true'

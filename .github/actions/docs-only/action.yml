@@ -1,0 +1,46 @@
+name: Documentation-only fast path
+description: Skip expensive checks only for root human documentation; unknown changes run all checks.
+outputs:
+  docs-only:
+    description: True only when every changed path is an allowlisted root document.
+    value: ${{ steps.diff.outputs.docs_only }}
+runs:
+  using: composite
+  steps:
+    - id: diff
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BEFORE_SHA: ${{ github.event.before }}
+      run: |
+        # Default to full checks. Never infer a multi-commit push from HEAD^.
+        docs_only=false
+        base=""
+        if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          # Checkout's synthetic merge parent is the PR's base, including all PR commits.
+          if git rev-parse --verify HEAD^1 >/dev/null 2>&1; then
+            base=HEAD^1
+          fi
+        elif [[ "$EVENT_NAME" == "push" && "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+          if git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null ||
+             git fetch --no-tags --depth=1 origin "$BEFORE_SHA"; then
+            base="$BEFORE_SHA"
+          fi
+        fi
+        paths="$RUNNER_TEMP/ci-docs-$GITHUB_JOB.paths"
+        if [[ -n "$base" ]] && git diff --name-only --no-renames -z "$base" HEAD > "$paths"; then
+          if [[ -s "$paths" ]]; then
+            docs_only=true
+            while IFS= read -r -d '' path; do
+              # Specs, prompts, help articles, agent rules and all other files remain checked.
+              case "$path" in
+                README.md|CHANGELOG.md|CONTRIBUTING.md) ;;
+                *) docs_only=false; break ;;
+              esac
+            done < "$paths"
+          fi
+        fi
+        echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+        if [[ "$docs_only" == "true" ]]; then
+          echo "Root documentation only; this required job reports success."
+        fi
