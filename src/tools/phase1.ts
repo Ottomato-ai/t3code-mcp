@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { wasNotSent, type T3Client } from "../client.js";
-import { attentionOf, newId, nowIso, pendingRequests } from "../model.js";
+import { attentionOf, pendingRequests } from "../model.js";
+import { commands } from "../v2.js";
 import type { Attention } from "../model.js";
 import {
   activityOverview,
@@ -139,7 +140,7 @@ export function registerPhase1(
     },
     async (args) => {
       try {
-        const shell = await getClient().shell();
+        const shell = await getClient().shell({ includeArchived: args.includeArchived === true });
         const projectsById = new Map(shell.projects.map((p) => [p.id, p]));
         const limit = args.limit ?? 25;
         const rows = shell.threads
@@ -287,21 +288,22 @@ export function registerPhase1(
           if (admission.kind === "queued") return queuedResult(admission, "send_message");
           gate = { desk, id: admission.entry.id, claim: admission.claim };
         }
-        const command = {
-          type: "thread.turn.start",
-          commandId: newId(),
-          threadId: t.id,
-          message: { messageId: newId(), role: "user", text: args.message, attachments: [] },
-          runtimeMode: args.runtimeMode ?? t.runtimeMode ?? "full-access",
-          interactionMode: args.interactionMode ?? t.interactionMode ?? "default",
-          createdAt: nowIso(),
-        };
+        // Protocol 2: modes are thread settings, set before the message when they change.
+        const pre: Record<string, unknown>[] = [];
+        if (args.runtimeMode && args.runtimeMode !== t.runtimeMode) pre.push(commands.setRuntimeMode(t.id, args.runtimeMode));
+        if (args.interactionMode && args.interactionMode !== t.interactionMode) {
+          pre.push(commands.setInteractionMode(t.id, args.interactionMode));
+        }
         let result: { sequence: number };
+        // Only the message can start a provider; a failed mode command launched nothing.
+        let atMessage = false;
         try {
-          result = await client.dispatch(command);
+          for (const c of pre) await client.dispatch(c);
+          atMessage = true;
+          result = await client.dispatch(commands.messageDispatch({ threadId: t.id, text: args.message }));
         } catch (e) {
           if (!gate) throw e;
-          throw failLaunch(gate.desk, gate.id, gate.claim, e, { sent: !wasNotSent(e), threadId: t.id, tool: "send_message" });
+          throw failLaunch(gate.desk, gate.id, gate.claim, e, { sent: atMessage && !wasNotSent(e), threadId: t.id, tool: "send_message" });
         }
         const warning = gate ? recordLaunch(gate.desk, gate.id, gate.claim, t.id) : undefined;
         return jsonResult({

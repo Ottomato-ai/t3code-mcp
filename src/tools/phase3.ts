@@ -176,7 +176,7 @@ export function registerPhase3(server: McpServer, getClient: () => T3Client) {
     },
     async (args) => {
       try {
-        const shell = await getClient().shell();
+        const shell = await getClient().shell({ includeArchived: true });
         const projectsById = new Map(shell.projects.map((p) => [p.id, p]));
         const words = args.query.toLowerCase().split(/\s+/).filter(Boolean);
         const matches = shell.threads

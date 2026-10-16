@@ -34,6 +34,12 @@ export function fakeClient(opts = {}) {
     statuses: opts.statuses ?? {},
     dispatched: [],
     shellCalls: 0,
+    /** Options passed to each shell() call. */
+    shellOpts: [],
+    /** Active run id per thread id (thread() detail), for interrupt_thread. */
+    activeRunIds: opts.activeRunIds ?? {},
+    /** Provider session ids per thread id (thread() detail), for stop_thread. */
+    sessionIds: opts.sessionIds ?? {},
     dispatchDelayMs: opts.dispatchDelayMs ?? 0,
     project: {
       id: "p1",
@@ -65,8 +71,9 @@ export function fakeClient(opts = {}) {
   });
   const client = {
     state,
-    async shell() {
+    async shell(shellOpts) {
       state.shellCalls++;
+      state.shellOpts.push(shellOpts ?? {});
       return {
         snapshotSequence: seq,
         updatedAt: new Date().toISOString(),
@@ -76,7 +83,16 @@ export function fakeClient(opts = {}) {
     },
     async thread(id) {
       const t = threadShell(id, state.statuses[id] ?? (state.running.includes(id) ? "running" : "stopped"));
-      return { snapshotSequence: seq, thread: { ...t, messages: [], activities: [] } };
+      return {
+        snapshotSequence: seq,
+        thread: {
+          ...t,
+          activeRunId: state.activeRunIds[id] ?? null,
+          providerSessionIds: state.sessionIds[id] ?? [],
+          messages: [],
+          activities: [],
+        },
+      };
     },
     async dispatch(cmd) {
       if (state.dispatchDelayMs) await new Promise((r) => setTimeout(r, state.dispatchDelayMs));

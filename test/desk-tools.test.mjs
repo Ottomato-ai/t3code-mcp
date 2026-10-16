@@ -74,7 +74,7 @@ test("launches at once when a slot is free and nobody waits", async (t) => {
   const { call, t3, entry } = await setup(t, { cap: 2, running: ["x"] });
   const r = await call("create_thread", create("Lane A"));
   assert.equal(r.created, true);
-  assert.deepEqual(t3.state.dispatched.map((d) => d.type), ["thread.create", "thread.turn.start"]);
+  assert.deepEqual(t3.state.dispatched.map((d) => d.type), ["thread.create", "message.dispatch"]);
   const e = entry(r.queue_entry);
   assert.equal(e.state, "launched");
   assert.equal(e.thread_id, r.threadId);
@@ -235,7 +235,7 @@ test("a failure after thread.create was sent (turn start fails) marks the entry 
   const { call, t3, store } = await setup(t, { cap: 1 });
   const ok = t3.dispatch;
   t3.dispatch = async (cmd) => {
-    if (cmd.type === "thread.turn.start") throw new T3Error("refused", { notSent: true });
+    if (cmd.type === "message.dispatch") throw new T3Error("refused", { notSent: true });
     return ok(cmd);
   };
   const r = await call("create_thread", create("Lane A"));
