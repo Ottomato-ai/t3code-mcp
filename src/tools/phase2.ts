@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { wasNotSent, type T3Client } from "../client.js";
-import { attentionOf, newId, nowIso, pendingRequests } from "../model.js";
+import { attentionOf, newId, pendingRequests } from "../model.js";
+import { commands } from "../v2.js";
 import type { ModelSelection, ThreadShell } from "../model.js";
 import { errorResult, jsonResult, messageRow, relTime, truncate } from "../format.js";
 import type { LaunchDesk } from "../desk/desk.js";
@@ -114,14 +115,9 @@ export function registerPhase2(
     },
     async (args) => {
       try {
-        const result = await getClient().dispatch({
-          type: "thread.approval.respond",
-          commandId: newId(),
-          threadId: args.threadId,
-          requestId: args.requestId,
-          decision: args.decision,
-          createdAt: nowIso(),
-        });
+        const result = await getClient().dispatch(
+          commands.respondApproval(args.threadId, args.requestId, args.decision),
+        );
         return jsonResult({ responded: true, decision: args.decision, sequence: result.sequence });
       } catch (e) {
         return errorResult(e);
@@ -147,14 +143,9 @@ export function registerPhase2(
     },
     async (args) => {
       try {
-        const result = await getClient().dispatch({
-          type: "thread.user-input.respond",
-          commandId: newId(),
-          threadId: args.threadId,
-          requestId: args.requestId,
-          answers: args.answers,
-          createdAt: nowIso(),
-        });
+        const result = await getClient().dispatch(
+          commands.respondUserInput(args.threadId, args.requestId, args.answers),
+        );
         return jsonResult({ responded: true, sequence: result.sequence });
       } catch (e) {
         return errorResult(e);
@@ -262,36 +253,25 @@ export function registerPhase2(
         // Sent means the request may have reached T3; only a refused connection is "not sent".
         let createSent = false;
         try {
-          // The HTTP dispatch path has no bootstrap expansion (that lives in the
-          // WS handler), so create the thread and start the turn as two commands.
+          // Create the thread, then start it with its first message (the same two commands
+          // T3's own MCP sends).
           try {
-            await client.dispatch({
-              type: "thread.create",
-              commandId: newId(),
-              threadId,
-              projectId: project.id,
-              title,
-              modelSelection: selection,
-              runtimeMode,
-              interactionMode,
-              branch: null,
-              worktreePath: null,
-              createdAt: nowIso(),
-            });
+            await client.dispatch(
+              commands.threadCreate({
+                threadId,
+                projectId: project.id,
+                title,
+                modelSelection: selection,
+                runtimeMode,
+                interactionMode,
+              }),
+            );
           } catch (e) {
             createSent = !wasNotSent(e);
             throw e;
           }
           createSent = true;
-          result = await client.dispatch({
-            type: "thread.turn.start",
-            commandId: newId(),
-            threadId,
-            message: { messageId: newId(), role: "user", text: args.message, attachments: [] },
-            runtimeMode,
-            interactionMode,
-            createdAt: nowIso(),
-          });
+          result = await client.dispatch(commands.messageDispatch({ threadId, text: args.message }));
         } catch (e) {
           throw failLaunch(desk, admission.entry.id, admission.claim, e, {
             sent: createSent,
@@ -329,13 +309,14 @@ export function registerPhase2(
     },
     async (args) => {
       try {
-        const result = await getClient().dispatch({
-          type: "thread.turn.interrupt",
-          commandId: newId(),
-          threadId: args.threadId,
-          createdAt: nowIso(),
-        });
-        return jsonResult({ interrupted: true, sequence: result.sequence });
+        const client = getClient();
+        const snap = await client.thread(args.threadId, { turnLimit: 1 });
+        const runId = snap.thread.activeRunId;
+        if (!runId) {
+          return errorResult(new Error(`Thread ${args.threadId} has no active run to interrupt.`));
+        }
+        const result = await client.dispatch(commands.runInterrupt(args.threadId, runId));
+        return jsonResult({ interrupted: true, runId, sequence: result.sequence });
       } catch (e) {
         return errorResult(e);
       }
@@ -353,13 +334,18 @@ export function registerPhase2(
     },
     async (args) => {
       try {
-        const result = await getClient().dispatch({
-          type: "thread.session.stop",
-          commandId: newId(),
-          threadId: args.threadId,
-          createdAt: nowIso(),
-        });
-        return jsonResult({ stopped: true, sequence: result.sequence });
+        // Protocol 2 has no session stop: detach every provider session, as the T3 UI does.
+        const client = getClient();
+        const snap = await client.thread(args.threadId, { turnLimit: 1 });
+        const sessionIds = snap.thread.providerSessionIds ?? [];
+        if (sessionIds.length === 0) {
+          return jsonResult({ stopped: false, note: "The thread has no live provider session; nothing to stop." });
+        }
+        let sequence = 0;
+        for (const id of sessionIds) {
+          sequence = (await client.dispatch(commands.detachSession(args.threadId, id))).sequence;
+        }
+        return jsonResult({ stopped: true, providerSessions: sessionIds.length, sequence });
       } catch (e) {
         return errorResult(e);
       }
@@ -449,11 +435,7 @@ export function registerPhase2(
     },
     async (args) => {
       try {
-        const result = await getClient().dispatch({
-          type: "thread.archive",
-          commandId: newId(),
-          threadId: args.threadId,
-        });
+        const result = await getClient().dispatch(commands.archive(args.threadId));
         return jsonResult({ archived: true, sequence: result.sequence });
       } catch (e) {
         return errorResult(e);
@@ -470,11 +452,7 @@ export function registerPhase2(
     },
     async (args) => {
       try {
-        const result = await getClient().dispatch({
-          type: "thread.unarchive",
-          commandId: newId(),
-          threadId: args.threadId,
-        });
+        const result = await getClient().dispatch(commands.unarchive(args.threadId));
         return jsonResult({ unarchived: true, sequence: result.sequence });
       } catch (e) {
         return errorResult(e);
@@ -491,12 +469,7 @@ export function registerPhase2(
     },
     async (args) => {
       try {
-        const result = await getClient().dispatch({
-          type: "thread.meta.update",
-          commandId: newId(),
-          threadId: args.threadId,
-          title: args.title,
-        });
+        const result = await getClient().dispatch(commands.setTitle(args.threadId, args.title));
         return jsonResult({ renamed: true, title: args.title, sequence: result.sequence });
       } catch (e) {
         return errorResult(e);

@@ -86,6 +86,6 @@ Clients connect to `http://<machine>:3774/` with `Authorization: Bearer <secret>
 
 ## Notes / limitations
 
-- Uses T3's HTTP JSON API only (`/api/orchestration/*`). Live push, git-worktree bootstrap, and turn diffs are WebSocket-RPC-only in T3, so: updates are polled, and `create_thread` runs threads directly in the project workspace (start worktree threads from the T3 UI).
+- Speaks T3 orchestration protocol 2: reads over HTTP (`/api/orchestration/*` with `x-t3-orchestration-protocol: 2`), commands and archived threads over one short-lived WebSocket RPC call each (`/ws`). Live push is not used: updates are polled, and `create_thread` runs threads directly in the project workspace (start worktree threads from the T3 UI).
 - Image attachments not yet supported on `send_message`.
 - Revoke access anytime: `npx t3@latest auth session list` / `... revoke`.

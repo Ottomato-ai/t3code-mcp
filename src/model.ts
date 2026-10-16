@@ -1,6 +1,7 @@
-// Loose mirrors of T3 Code wire shapes (packages/contracts/src/orchestration.ts).
-// Parsed defensively: unknown fields ignored, optional fields may be absent on
-// older/newer server versions.
+// Shapes the tools read. These mirror the T3 Code V1 wire shapes
+// (packages/contracts/src/orchestration.ts). Since orchestration protocol 2, the client maps
+// V2 snapshots into them (see v2.ts). Parsed defensively: unknown fields ignored, optional
+// fields may be absent.
 
 export interface ServerRuntime {
   version: number;
@@ -111,6 +112,10 @@ export interface Activity {
 }
 
 export interface ThreadDetail extends ThreadShell {
+  /** Protocol 2: the run a run.interrupt must name (null when nothing runs). */
+  activeRunId?: string | null;
+  /** Protocol 2: provider sessions attached to the thread (provider-session.detach targets). */
+  providerSessionIds?: string[];
   messages: Message[];
   activities: Activity[];
   proposedPlans?: unknown[];
@@ -182,8 +187,4 @@ export function pendingRequests(activities: Activity[]): PendingRequest[] {
 
 export function newId(): string {
   return crypto.randomUUID();
-}
-
-export function nowIso(): string {
-  return new Date().toISOString();
 }

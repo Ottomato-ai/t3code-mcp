@@ -5,7 +5,7 @@ const client = c.makeClient();
 const ids = process.argv.slice(2);
 for (const id of ids) {
   try {
-    await client.dispatch({ type: "thread.meta.update", commandId: randomUUID(), threadId: id,
+    await client.dispatch({ type: "thread.model-selection.set", commandId: randomUUID(), threadId: id,
       modelSelection: { instanceId: "claudeAgent_claude_2", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }, { id: "fastMode", value: false }] } });
   } catch (e) { console.log(id.slice(0,8), "ERR", String(e).slice(0,200)); }
 }

@@ -30,12 +30,13 @@ The driving use case is **eyes-free / voice control**: "what are my agents doing
 |---|---|
 | Server discovery | `~/.t3/userdata/server-runtime.json` → `{origin, pid, port}`; overridable via `T3_ORIGIN` |
 | Liveness probe | `GET /.well-known/t3/environment` (unauthenticated) |
-| List projects + threads | `GET /api/orchestration/shell` → `{snapshotSequence, projects[], threads[]}` |
-| Thread detail (messages, activities, session) | `GET /api/orchestration/threads/:threadId?turnLimit=N&beforeCursor=…` |
-| All mutations | `POST /api/orchestration/dispatch` with a `ClientOrchestrationCommand` (`thread.turn.start`, `thread.turn.interrupt`, `thread.approval.respond`, `thread.user-input.respond`, `thread.session.stop`, `thread.archive`, …) |
+| Protocol | Orchestration protocol 2 (T3 auto-update 2026-10-16): every orchestration HTTP call sends `x-t3-orchestration-protocol: 2` (without it: HTTP 400, empty body). V2 snapshots are mapped to the shapes below in `src/v2.ts`. Plan: `docs/plans/2026-10-16-t3-protocol-v2.md`. |
+| List projects + threads | `GET /api/orchestration/shell` → V2 `{schemaVersion, snapshotSequence, projects[], threads[], archivedThreads[]}`; archived threads come from the RPC `orchestration.getArchivedShellSnapshot` |
+| Thread detail (messages, activities, session) | `GET /api/orchestration/threads/:threadId` → V2 `{snapshotSequence, projection}` (full projection; `turnLimit`/`beforeCursor` applied client-side) |
+| All mutations | WebSocket RPC `orchestration.dispatchCommand` at `/ws?orchestrationProtocol=2` (bearer header, Effect RPC JSON frames) with an `OrchestrationV2Command` (`message.dispatch`, `run.interrupt`, `runtime-request.respond`, `provider-session.detach`, `thread.metadata.update`, `thread.archive`, …). `POST /api/orchestration/dispatch` no longer exists (HTTP 404). |
 | Auth | `Authorization: Bearer <token>`; token minted once via `npx t3 auth session issue --token-only --label t3code-mcp` (localhost is **not** unauthenticated). Reads need `orchestration:read`, dispatch needs `orchestration:operate`. |
 
-Live updates over T3's WebSocket (Effect RPC) are intentionally **out of scope**; Phase 3 uses polling (`wait_for_turn`, `wait_for_change`), which is plenty for the voice cadence and avoids coupling to Effect RPC framing.
+Live updates over T3's WebSocket (Effect RPC subscriptions) are intentionally **out of scope**; Phase 3 uses polling (`wait_for_turn`, `wait_for_change`). Since protocol 2 the RPC socket is used for single request/response calls only (dispatch, archived snapshot).
 
 ### Key data-model facts
 
@@ -62,7 +63,7 @@ Live updates over T3's WebSocket (Effect RPC) are intentionally **out of scope**
 | `list_projects` | `activeOnly?` | Projects with id, title, workspaceRoot; thread counts per project. |
 | `list_threads` | `projectId?`, `attention?`, `includeArchived?`, `limit?` (default 25) | Compact rows sorted by recency: id, title, project title, provider+model, `attention`, latest-turn state, branch, updatedAt. Filter by project or attention state. |
 | `get_thread` | `threadId`, `turnLimit?` (default 5), `beforeCursor?`, `includeActivities?` | Messages of the last N turns (role, text, timestamps), session status, latest turn, pending approvals/questions **with requestIds and detail**, proposed plans, pagination cursor. |
-| `send_message` | `threadId`, `message`, `runtimeMode?`, `interactionMode?` | Dispatch `thread.turn.start` on an existing thread; defaults to the thread's current modes. Returns dispatch sequence + turn confirmation. |
+| `send_message` | `threadId`, `message`, `runtimeMode?`, `interactionMode?` | `message.dispatch` (`start_immediately`; T3 queues it behind an active run) on an existing thread; a changed mode is set first with `thread.runtime-mode.set` / `thread.interaction-mode.set`. Returns dispatch sequence + turn confirmation. |
 
 Infrastructure in this phase: origin discovery, token loading (`T3_TOKEN` env or `.env`), HTTP client with typed wire shapes, error mapping, stdio transport, registration docs for `claude mcp add`.
 
@@ -71,15 +72,15 @@ Infrastructure in this phase: origin discovery, token loading (`T3_TOKEN` env or
 | Tool | Params | Behavior |
 |---|---|---|
 | `pending_actions` | — | Cross-thread digest of everything blocked on the human: approvals (with command/file detail), questions (with options), actionable plans, errored sessions. The voice "inbox". |
-| `respond_to_approval` | `threadId`, `requestId`, `decision` | `thread.approval.respond`; decision `accept/acceptForSession/decline/cancel`. |
-| `respond_to_user_input` | `threadId`, `requestId`, `answers` | `thread.user-input.respond`; answers keyed by question id. |
+| `respond_to_approval` | `threadId`, `requestId`, `decision` | `runtime-request.respond` with `decision` `accept/acceptForSession/decline/cancel`. |
+| `respond_to_user_input` | `threadId`, `requestId`, `answers` | `runtime-request.respond` with `answers` keyed by question id. |
 | `send_message` (gate) | `lane?`, `queue_entry?`, `ned_requested?` | See Launch desk: required only when the thread has no live session. |
-| `create_thread` | `projectId`, `message`, `lane`, `queue_entry?`, `ned_requested?`, `title?`, `provider?`, `model?`, `effort?`, `runtimeMode?`, `interactionMode?` | Gated by the launch desk (see Launch desk below): launches only when a slot is free and nobody waits ahead, else answers `queued`. Effort defaults to `high`; `max` needs `ned_requested`. Two dispatches: `thread.create` then `thread.turn.start` (the `bootstrap` expansion is WS-only server-side, so the HTTP path must do the two-step itself). Model defaults to the project's `defaultModelSelection`, then the project's most recent thread's model. Threads run in the project workspace — worktree preparation is a WS-only service, so worktree threads must be started from the T3 UI. |
-| `interrupt_thread` | `threadId` | `thread.turn.interrupt` on the active turn. |
-| `stop_thread` | `threadId` | `thread.session.stop` (shuts down the provider process; thread stays). |
+| `create_thread` | `projectId`, `message`, `lane`, `queue_entry?`, `ned_requested?`, `title?`, `provider?`, `model?`, `effort?`, `runtimeMode?`, `interactionMode?` | Gated by the launch desk (see Launch desk below): launches only when a slot is free and nobody waits ahead, else answers `queued`. Effort defaults to `high`; `max` needs `ned_requested`. Two dispatches: `thread.create` then `message.dispatch` (`createdBy: user`, `creationSource: mcp`), the same flow as T3's own MCP. Model defaults to the project's `defaultModelSelection`, then the project's most recent thread's model. Threads run in the project workspace — worktree preparation is a WS-only service, so worktree threads must be started from the T3 UI. |
+| `interrupt_thread` | `threadId` | `run.interrupt` on the active run; an error when nothing runs. |
+| `stop_thread` | `threadId` | `provider-session.detach` for each provider session, as the T3 UI does (shuts down the provider process; thread stays). |
 | `wait_for_turn` | `threadId`, `timeoutSeconds?` (default 120, max 300) | Poll until the latest turn leaves `running` **or** the thread starts waiting on approval/input; return final assistant text or what's being asked. Turns "send and check back" into one voice round-trip. |
 | `archive_thread` / `unarchive_thread` | `threadId` | `thread.archive` / `thread.unarchive`. |
-| `set_thread_title` | `threadId`, `title` | `thread.meta.update` (nice for voice: "call this one 'auth bug'"). |
+| `set_thread_title` | `threadId`, `title` | `thread.metadata.update` (nice for voice: "call this one 'auth bug'"). |
 
 ### Phase 3 — Voice & remote layer
 
@@ -94,7 +95,7 @@ Plus **remote transport**: `--http --port <p>` runs the MCP server as streamable
 
 ### Launch desk (cap and queue)
 
-Design: `Infra/docs/superpowers/specs/2026-10-12-t3-launch-queue-design.md`. At most `T3_LAUNCH_CAP` (default 15) live T3 threads (session `running`, `ready`, `starting` or `interrupted`, not archived) across all lanes; the count is read from `GET /api/orchestration/shell` at decision time.
+Design: `Infra/docs/superpowers/specs/2026-10-12-t3-launch-queue-design.md`. At most `T3_LAUNCH_CAP` (default 15) live T3 threads (session `running`, `ready`, `starting` or `interrupted`, not archived) across all lanes; the count is read from `GET /api/orchestration/shell` at decision time. The protocol 2 shell has no session state, so the session is derived: an active run or pending request is `running`/`starting`, a run that ended less than 30 minutes ago is `ready` (T3 releases an idle provider session after 30 minutes), older is `stopped`, a failed run is `error`. `get_thread` and `send_message` read the real provider session status from the thread projection.
 
 | Tool | Params | Behavior |
 |---|---|---|
