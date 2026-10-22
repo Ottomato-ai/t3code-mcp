@@ -12,11 +12,11 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs && node --test test/headroom.test.mjs && node --test test/effort.test.mjs && node --test test/v2-map.test.mjs && node --test test/v2-commands.test.mjs && node --test test/v2-client.test.mjs && node --test test/v2-tools.test.mjs",
+    "test": "tsc && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs && node --test test/headroom.test.mjs && node --test test/effort.test.mjs && node --test test/v2-map.test.mjs && node --test test/v2-commands.test.mjs && node --test test/v2-client.test.mjs && node --test test/v2-tools.test.mjs && node --test test/node-pin.test.mjs",
     "smoke": "node scripts/smoke.mjs"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.23.4 <23 || >=24.22.1 <25 || >=26.12.1"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.changes.outputs.docs-only != 'true'
         with:
-          node-version: 24
+          node-version: 24.22.1
           cache: pnpm
       - run: pnpm install --frozen-lockfile
         if: steps.changes.outputs.docs-only != 'true'
