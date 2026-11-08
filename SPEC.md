@@ -61,9 +61,9 @@ Live updates over T3's WebSocket (Effect RPC subscriptions) are intentionally **
 |---|---|---|
 | `t3_status` | — | Server reachable? version, environment label, auth OK, counts: projects, active threads, threads needing attention. |
 | `list_projects` | `activeOnly?` | Projects with id, title, workspaceRoot; thread counts per project. |
-| `list_threads` | `projectId?`, `attention?`, `includeArchived?`, `limit?` (default 25) | Compact rows sorted by recency: id, title, project title, provider+model, `attention`, latest-turn state, branch, updatedAt. Filter by project or attention state. |
+| `list_threads` | `projectId?`, `attention?`, `includeArchived?`, `limit?` (default 25, max 100 per page), `cursor?`, `order?` (`updated` default, `created`) | Compact rows sorted by recency: id, title, project title, provider+model, `attention`, latest-turn state, branch, updatedAt. Filter by project or attention state. Keyset-paged, never truncated: `total`, `returnedSoFar`, `hasMore`, `nextCursor`, and across pages `changedSinceFirstPage` / `consistentSinceFirstPage` (see README, Complete thread lists). |
 | `get_thread` | `threadId`, `turnLimit?` (default 5), `beforeCursor?`, `includeActivities?` | Messages of the last N turns (role, text, timestamps), session status, latest turn, pending approvals/questions **with requestIds and detail**, proposed plans, pagination cursor. |
-| `send_message` | `threadId`, `message`, `runtimeMode?`, `interactionMode?` | `message.dispatch` (`start_immediately`; T3 queues it behind an active run) on an existing thread; a changed mode is set first with `thread.runtime-mode.set` / `thread.interaction-mode.set`. Returns dispatch sequence + turn confirmation. |
+| `send_message` | `threadId`, `message`, `runtimeMode?`, `interactionMode?`, `idempotencyKey?` | `message.dispatch` (`start_immediately`; T3 queues it behind an active run) on an existing thread; a changed mode is set first with `thread.runtime-mode.set` / `thread.interaction-mode.set`. Journaled: an unproven outcome is reconciled (message lookup, then a replay with the same `commandId`), never resent with new ids; `idempotencyKey` fixes the ids across caller retries. Returns dispatch sequence, `outcome`, `commandId`, `messageId`. |
 
 Infrastructure in this phase: origin discovery, token loading (`T3_TOKEN` env or `.env`), HTTP client with typed wire shapes, error mapping, stdio transport, registration docs for `claude mcp add`.
 
@@ -88,7 +88,11 @@ Infrastructure in this phase: origin discovery, token loading (`T3_TOKEN` env or
 |---|---|---|
 | `thread_digest` | `threadId`, `sinceMinutes?` | Chronological, TTS-friendly digest of recent activity: what the agent did (tool activity summarized), what it said (last assistant message), what it needs. Plain sentences, no markdown/code dumps. |
 | `workspace_digest` | `activeOnly?` | One line per in-flight thread across all projects — the "drive home briefing". |
-| `search_threads` | `query`, `limit?` | Substring/fuzzy match over titles + project names + branch from the shell snapshot (server-side search is WS-only). |
+| `search_threads` | `query`, `limit?` (default 10, max 50 per page), `cursor?` | Substring/fuzzy match over titles + project names + branch from the shell snapshot (server-side search is WS-only). Keyset-paged like `list_threads`. |
+| `queue_status` | `threadId`, `includeText?`, `maxTextChars?`, `limit?`, `cursor?` | One thread's queued runs in T3's delivery order (automatic completions first), run phase (`stopped`, `preparing`, `starting`, `running`, `waiting`), holds, kind, age, text SHA-256, starvation flag. Reads `GET /api/orchestration/threads/:id/bounded` (full projection only on servers without it). |
+| `send_now` | `threadId`, `queuedRunId?`, `minAgeSeconds?` (≥ 300), `waitSeconds?` (≤ 120), `pollSeconds?`, `releaseHold?`, `verifySeconds?` | `queued-run.start` for one queued user message, only while no run is active, after a fresh read; never interrupts, steers or cancels; parked threads (`T3_PARKED_THREADS`) never. Journaled; outcome `delivered`, `deferred` or `unknown` (quarantined). |
+| `reconcile_send` | `threadId`, `queuedRunId?` or `messageId?`, `allowReplay?` | Settle an unproven send on proof only (state, or a replay of the same `commandId` answered from T3's receipt). |
+| `delivery_journal` | — | Read-only: open (in-flight or unknown) sends on this machine. |
 | `wait_for_change` | `timeoutSeconds?` (default 60, max 300) | Long-poll the shell snapshot; return when any thread changes attention state (turn completes, approval appears…). Enables a voice loop that stays quiet until something happens. |
 
 Plus **remote transport**: `--http --port <p>` runs the MCP server as streamable HTTP with its own bearer auth (`MCP_HTTP_TOKEN`), bound to 127.0.0.1 by default, so Hermes or any remote voice agent can connect via Tailscale/tunnel while T3 Code itself stays localhost-only.
