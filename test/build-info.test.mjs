@@ -66,3 +66,17 @@ test("verify-deploy: shows the timeouts a launch environment gives, and flags va
   assert.deepEqual(report.effectiveTimeouts, { httpMs: 120000, probeMs: 15000, rpcMs: 30000 });
   assert.ok(report.problems.some((p) => /ignores: T3_MCP_HTTP_TIMEOUT/.test(p)));
 });
+
+test("verify-deploy: missing newer config export means UNKNOWN, not proof legacy client ignores env", (t) => {
+  const dir = copyDist(t), config = join(dir, "config.js");
+  const source = readFileSync(config, "utf8");
+  assert.ok(source.includes("export function loadTimeouts"));
+  writeFileSync(config, source.replace("export function loadTimeouts", "function loadTimeouts"));
+  const client = join(dir, "client.js");
+  writeFileSync(client, readFileSync(client, "utf8") + "\n// legacy: Number(process.env.T3_HTTP_TIMEOUT_MS)\n");
+  const { code, report } = verify(["--dist", dir]);
+  assert.equal(code, 1, "genuine build drift remains an error");
+  assert.equal(report.effectiveTimeouts, null);
+  assert.match(report.timeoutEvaluation, /unknown.*may read environment/);
+  assert.ok(!report.problems.some((p) => /cannot read timeouts|timeouts are not configurable/.test(p)));
+});

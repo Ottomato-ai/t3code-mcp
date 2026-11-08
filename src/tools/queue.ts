@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { T3Client } from "../client.js";
 import { errorResult, jsonResult } from "../format.js";
-import { queueView } from "../queue.js";
+import { queueView, runWasDelivered, sha256, type RawRun } from "../queue.js";
 import { describeRecord, type DeliveryJournal } from "../delivery/journal.js";
 import {
   MAX_VERIFY_SECONDS,
@@ -36,6 +36,37 @@ function readQueueCursor(cursor: string): { o: number; s: number } {
     // fall through
   }
   throw new Error("cursor is not valid: pass nextCursor exactly as returned, or start again without a cursor.");
+}
+
+/** Read-only exact-run evidence for legacy quarantines whose old commandId was not recorded.
+ * Never invents/imports a journal command and never dispatches/replays anything.
+ */
+export async function readRunEvidence(client: T3Client, threadId: string, runId: string) {
+  const end = Date.now() + client.timeouts.httpMs;
+  let read = await client.projection(threadId, { bounded: true, timeoutMs: client.timeouts.httpMs });
+  let run = (read.snapshot.projection.runs as unknown as RawRun[]).find((r) => r.id === runId);
+  if (!run && read.source === "bounded" && read.hasMoreHistory) {
+    const remaining = end - Date.now();
+    if (remaining <= 0) throw new Error("Exact-run evidence read budget expired; outcome unknown.");
+    read = await client.projection(threadId, { bounded: false, timeoutMs: remaining });
+    run = (read.snapshot.projection.runs as unknown as RawRun[]).find((r) => r.id === runId);
+  }
+  if (!run) return { threadId, runId, found: false, source: read.source, outcome: "unknown", note: "Absence is not evidence of delivery or failure; preserve the legacy quarantine." };
+  const message = (read.snapshot.projection.messages as unknown as { id: string; runId?: string | null; text?: string }[]).find((m) => m.id === run!.userMessageId);
+  const promoted = (read.snapshot.projection.turnItems as unknown as { id: string; messageId?: string; runId?: string; inputIntent?: string; status?: string; completedAt?: string }[]).find((item) =>
+    item.messageId === run!.userMessageId && item.inputIntent === "promoted_queued_to_steer" && item.status === "completed" && item.runId !== runId && item.runId === message?.runId,
+  );
+  const lifecycleProven = runWasDelivered(run.status) || (typeof run.startedAt === "string" && Number.isFinite(Date.parse(run.startedAt)));
+  return {
+    threadId, runId, found: true, source: read.source,
+    snapshotSequence: read.snapshot.snapshotSequence,
+    run: { status: run.status, requestedAt: run.requestedAt ?? null, startedAt: run.startedAt ?? null, completedAt: run.completedAt ?? null, messageId: run.userMessageId ?? null },
+    message: message ? { messageId: message.id, runId: message.runId ?? null, textSha256: typeof message.text === "string" ? sha256(message.text) : null } : null,
+    lifecycleProven,
+    steeringEvidence: promoted ? { turnItemId: promoted.id, messageId: promoted.messageId, targetRunId: promoted.runId, inputIntent: promoted.inputIntent, completedAt: promoted.completedAt ?? null } : null,
+    deliveryProven: lifecycleProven || promoted !== undefined,
+    note: "Read-only original-run state. Cancelled/missing alone is not delivery proof; a matching native promoted_queued_to_steer turn item is explicit steering evidence. No quarantine is changed and no command is replayed.",
+  };
 }
 
 export function registerQueueTools(
@@ -103,6 +134,19 @@ export function registerQueueTools(
       } catch (e) {
         return errorResult(e);
       }
+    },
+  );
+
+  server.registerTool(
+    "get_run",
+    {
+      title: "Read exact original-run evidence (no replay)",
+      description: "Read one exact run's native lifecycle and original message identity for legacy uncertainty reconciliation. Bounded snapshot first, one time-budgeted historical fallback if needed. Missing/cancelled is not delivery proof. Never sends, replays, clears a journal or removes a quarantine.",
+      inputSchema: { threadId: z.string().min(1), runId: z.string().min(1) },
+    },
+    async (args) => {
+      try { return jsonResult(await readRunEvidence(getClient(), args.threadId, args.runId)); }
+      catch (e) { return errorResult(e); }
     },
   );
 

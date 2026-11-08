@@ -12,17 +12,19 @@
 //   being queued (an accepted queued-run.start can leave its run queued).
 // - Resolved records move to resolved/ and are kept for audit.
 import {
+  closeSync,
+  fsyncSync,
+  openSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { deliveryStateDir } from "../config.js";
 
@@ -70,8 +72,7 @@ export type ClaimResult = { ok: true; record: JournalRecord } | { ok: false; exi
 /** The record changed under us (resolved elsewhere, or replaced by a newer claim). */
 export class JournalConflictError extends Error {}
 
-/** A lock file older than this belongs to a crashed writer (critical sections take milliseconds). */
-const STALE_LOCK_MS = 10_000;
+// Lock age is NEVER evidence that its holder died. Orphan locks fail closed for explicit audit.
 const LOCK_WAIT_MS = 5_000;
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -107,9 +108,39 @@ export class DeliveryJournal {
     return new Date(this.opts.now?.() ?? Date.now()).toISOString();
   }
 
+  private syncDir(path: string): void {
+    let fd: number | undefined;
+    try {
+      fd = openSync(path, "r");
+      fsyncSync(fd);
+    } catch (e) {
+      // Node cannot open/flush directory handles on Windows. File data is still flushed;
+      // full directory-entry power-loss durability is only promised where supported.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || !["EPERM", "EISDIR", "EBADF", "EINVAL", "ENOTSUP"].includes(code ?? "")) throw e;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+
   private ensure(): void {
+    const first = mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    // Flush every newly created ancestor, deepest first: the journal root itself must
+    // survive a host failure, not merely the record within it.
+    if (first) {
+      let path = this.dir;
+      for (;;) {
+        this.syncDir(path);
+        if (path === first) break;
+        const parent = dirname(path);
+        if (parent === path) break;
+        path = parent;
+      }
+      this.syncDir(dirname(first));
+    }
     mkdirSync(this.openDir, { recursive: true, mode: 0o700 });
     mkdirSync(this.resolvedDir, { recursive: true, mode: 0o700 });
+    this.syncDir(this.dir);
   }
 
   private path(key: string): string {
@@ -179,11 +210,18 @@ export class DeliveryJournal {
   private write(record: JournalRecord): void {
     this.ensure();
     const tmp = join(this.openDir, `.${record.key}.${process.pid}.${randomUUID()}.tmp`);
-    writeFileSync(tmp, JSON.stringify(record, null, 1), { mode: 0o600 });
+    const fd = openSync(tmp, "wx", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(record, null, 1));
+      fsyncSync(fd); // Persist command identity before any caller can dispatch it.
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, this.path(record.key));
+    this.syncDir(this.openDir); // Persist the atomic rename before returning the claim.
   }
 
-  /** Run fn while holding the record's lock file (exclusive create; a crashed holder's lock expires). */
+  /** Exclusive short critical section. Never steal a live/unknown/orphan owner by age. */
   private withLock<T>(key: string, fn: () => T): T {
     this.ensure();
     const lock = join(this.openDir, `${key}.lock`);
@@ -195,12 +233,7 @@ export class DeliveryJournal {
         break;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        try {
-          if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) unlinkSync(lock);
-        } catch {
-          // released or broken meanwhile
-        }
-        if (Date.now() > waitUntil) throw new Error(`delivery journal record ${key} is locked by another process`);
+        if (Date.now() > waitUntil) throw new Error(`delivery journal record ${key} is locked (live or orphaned); age does not authorize lock removal; audit the owner and send before manual recovery`);
         sleepSync(10);
       }
     }
@@ -309,6 +342,8 @@ export class DeliveryJournal {
     const target = join(this.resolvedDir, `${record.key}-${Date.parse(record.updatedAt) || Date.now()}-${randomUUID().slice(0, 8)}.json`);
     try {
       renameSync(this.path(record.key), target);
+      this.syncDir(this.resolvedDir);
+      this.syncDir(this.openDir);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     }

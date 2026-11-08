@@ -1,4 +1,9 @@
 // Delivery journal (src/delivery/journal.ts): exclusive claims, proof-only resolution.
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, utimesSync, writeFileSync } from "node:fs";
@@ -80,7 +85,7 @@ test("fencing: a stale writer cannot resolve or archive a newer claim for the sa
   assert.equal(now.status, "in_flight");
 });
 
-test("a lock left by a crashed writer expires", (t) => {
+test("an old orphan lock is NOT stolen: dead pid/age does not settle a send", (t) => {
   const dir = tempDir(t);
   const j = new DeliveryJournal(dir);
   const r = claim(j).record;
@@ -88,5 +93,50 @@ test("a lock left by a crashed writer expires", (t) => {
   writeFileSync(lock, "999:dead");
   const old = new Date(Date.now() - 60_000);
   utimesSync(lock, old, old);
-  assert.equal(j.note(r, "after crash").events.at(-1).event, "after crash");
+  assert.throws(() => j.note(r, "after crash"), /live or orphaned/);
+  assert.equal(j.get("t", "r").commandId, "c1");
+  assert.equal(readdirSync(join(dir, "open")).includes(`${journalKey("t", "r")}.lock`), true);
+});
+
+test("durable claims flush their data and directory; resolution remains audited", (t) => {
+  const dir = tempDir(t);
+  const j = new DeliveryJournal(join(dir, "new", "nested", "journal"));
+  const c = claim(j);
+  assert.equal(c.ok, true);
+  assert.equal(j.get("t", "r").commandId, "c1");
+  j.resolve(c.record, "delivered");
+  assert.equal(j.open().length, 0);
+  assert.equal(readdirSync(join(j.dir, "resolved")).length, 1);
+});
+
+test("a live writer paused beyond the old 10s expiry keeps exclusive ownership (two OS processes)", { timeout: 30_000 }, async (t) => {
+  const dir = tempDir(t);
+  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL("./journal-live-owner.fixture.mjs", import.meta.url)), "parent", dir], { timeout: 25_000 });
+  const r = JSON.parse(stdout);
+  assert.equal(r.writerAAliveAtSecondClaim, true);
+  assert.equal(r.firstClaimAccepted, true);
+  assert.equal(r.secondClaimAccepted, false);
+  assert.equal(r.finalJournalCommand, "command-A");
+  assert.equal(r.violation, false);
+});
+
+test("claim flushes file data before the containing directory, before dispatch can begin", (t) => {
+  const calls = [], real = fs.fsyncSync;
+  fs.fsyncSync = function(fd) { calls.push(fs.fstatSync(fd).isDirectory() ? "directory" : "file"); return real(fd); };
+  syncBuiltinESMExports();
+  try {
+    const j = new DeliveryJournal(tempDir(t));
+    claim(j);
+    const data = calls.indexOf("file");
+    assert.ok(data >= 0, "record file was fsynced");
+    if (process.platform !== "win32") assert.ok(calls.slice(data + 1).includes("directory"), "rename was directory-fsynced after data");
+  } finally { fs.fsyncSync = real; syncBuiltinESMExports(); }
+});
+
+test("a failed file flush fails the claim closed, before any dispatch", (t) => {
+  const dir = tempDir(t), real = fs.fsyncSync;
+  fs.fsyncSync = function(fd) { if (!fs.fstatSync(fd).isDirectory()) throw Object.assign(new Error("simulated flush failure"), { code: "EIO" }); return real(fd); };
+  syncBuiltinESMExports();
+  try { assert.throws(() => claim(new DeliveryJournal(dir)), /simulated flush failure/); }
+  finally { fs.fsyncSync = real; syncBuiltinESMExports(); }
 });

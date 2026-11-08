@@ -119,11 +119,19 @@ if (existsSync(configPath)) {
   try {
     Object.assign(process.env, launchEnv);
     const config = await import(pathToFileURL(configPath).href);
-    report.effectiveTimeouts = typeof config.loadTimeouts === "function" ? config.loadTimeouts() : "the deployed config has no loadTimeouts (timeouts are not configurable)";
+    const introspectable = typeof config.loadTimeouts === "function";
+    report.effectiveTimeouts = introspectable ? config.loadTimeouts() : null;
     report.timeoutVariables = config.TIMEOUT_ENV ?? null;
-    if (typeof config.loadTimeouts !== "function") problems.push("the deployed dist cannot read timeouts from the environment");
-    const unknown = Object.keys(launchEnv).filter((k) => /TIMEOUT/i.test(k) && !Object.values(config.TIMEOUT_ENV ?? {}).includes(k));
-    if (unknown.length) problems.push(`launch environment sets timeout variables this dist ignores: ${unknown.join(", ")}`);
+    if (!introspectable) {
+      // Legacy clients can read process.env directly in client.js. Missing this newer
+      // export proves only that this verifier cannot evaluate their effective values.
+      report.timeoutEvaluation = "unknown: legacy build has no config.loadTimeouts; client.js may read environment variables directly";
+      problems.push("effective timeouts cannot be introspected for this legacy build (unknown, not proof that environment settings are ignored)");
+    }
+    if (introspectable && config.TIMEOUT_ENV) {
+      const unknown = Object.keys(launchEnv).filter((k) => /TIMEOUT/i.test(k) && !Object.values(config.TIMEOUT_ENV).includes(k));
+      if (unknown.length) problems.push(`launch environment sets timeout variables this dist ignores: ${unknown.join(", ")}`);
+    }
   } catch (e) {
     problems.push(`could not load the deployed config (${e.message})`);
   } finally {

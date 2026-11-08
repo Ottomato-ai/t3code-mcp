@@ -138,3 +138,23 @@ Clients connect to `http://<machine>:3774/` with `Authorization: Bearer <secret>
 - T3 offers no queue-only read; `queue_status` uses the bounded snapshot, which still carries recent history and is heavier than the queue alone.
 - Message ages are measured with this machine's clock against T3's `requestedAt`.
 - Revoke access anytime: `npx t3@latest auth session list` / `... revoke`.
+
+
+### Delivery safety follow-up (2026-11-08)
+
+- Journal critical-section locks are never stolen on elapsed time, including locks whose recorded
+  process appears dead. A paused live owner must retain exclusion. An orphan lock fails closed and
+  needs explicit owner/send audit before manual recovery; do not delete its uncertain send record.
+- On systems supporting directory fsync (including Linux), the command record is file-fsynced,
+  atomically renamed, and directory-fsynced before dispatch. Resolved moves flush both directories.
+  Windows file data is flushed, but Node's unsupported directory-handle flush is best effort there.
+- `get_run({threadId,runId})` is read-only exact-run evidence for legacy quarantines that never
+  recorded a command ID. It does not import, replay or clear them. Missing/cancelled alone is not
+  delivery proof. A matching completed native `promoted_queued_to_steer` item, original message ID
+  and reassigned target run are explicit historical steering evidence, not a new steering action.
+- A legacy build without `config.loadTimeouts` has unknown introspection, not necessarily fixed
+  timeouts: some deployed clients read the environment directly in `client.js`.
+- Operational callers must migrate queue pages, full-text hashes and stopped-only send parameters;
+  the old running-state steering helper must not be reused. Persistent state directories must be
+  shared by cooperating processes **within one T3 environment**, never accidentally across origins.
+- These connector changes do not change T3's native automatic-completion-first scheduler or add aging.
