@@ -15,6 +15,72 @@ import {
 import type { LaunchDesk } from "../desk/desk.js";
 import { LIVE_SESSION_STATES, runningThreadIds } from "../desk/running.js";
 import { failLaunch, queuedResult, recordLaunch } from "./desk.js";
+import { ms, paginate, queryHash } from "../paging.js";
+import { sha256 } from "../queue.js";
+import { stableId } from "../model.js";
+import { dispatchMessage, type MessageSendResult } from "../delivery/deliver.js";
+import { defaultDelivery } from "../delivery/context.js";
+import { connectorVersion, readBuildInfo } from "../build-info.js";
+import { TIMEOUT_ENV, loadTimeouts } from "../config.js";
+import type { DeliveryContext } from "./queue.js";
+
+/** What runs here: build provenance, effective timeouts, open journal records. */
+function connectorStatus(client: T3Client | undefined, getDelivery: () => DeliveryContext) {
+  const build = readBuildInfo();
+  let journal: { dir: string; open: number } | { error: string };
+  let parked: number | null = null;
+  try {
+    const d = getDelivery();
+    journal = { dir: d.journal.dir, open: d.journal.open().length };
+    parked = d.parked.size;
+  } catch (e) {
+    journal = { error: e instanceof Error ? e.message : String(e) };
+  }
+  return {
+    version: connectorVersion(),
+    build: build
+      ? { gitSha: build.gitSha, gitDirty: build.gitDirty, sourceHash: build.sourceHash, builtAt: build.builtAt }
+      : "no build-info.json: this dist was not built with scripts/build-info.mjs",
+    timeouts: client ? client.timeouts : safeTimeouts(),
+    timeoutVariables: TIMEOUT_ENV,
+    deliveryJournal: journal,
+    parkedThreads: parked,
+  };
+}
+
+function safeTimeouts() {
+  try {
+    return loadTimeouts();
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function safeConnectorStatus(getDelivery: () => DeliveryContext) {
+  try {
+    return connectorStatus(undefined, getDelivery);
+  } catch {
+    return undefined;
+  }
+}
+
+/** A send whose outcome is not "delivered": an error result that says not to resend blindly. */
+function uncertainSendResult(threadId: string, sent: MessageSendResult) {
+  const advice =
+    sent.outcome === "unknown"
+      ? "Do NOT send this message again with new text or without the same idempotencyKey: it may already be in the thread. " +
+        "Run reconcile_send with this threadId and messageId (allowReplay: true asks T3 by commandId, applying it at most once)."
+      : "T3 did not take the message; nothing was sent.";
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Error: message send outcome ${sent.outcome} (${sent.reason}). ${advice}\n${JSON.stringify({ threadId, ...sent }, null, 1)}`,
+      },
+    ],
+    isError: true,
+  };
+}
 
 const ATTENTION_VALUES = [
   "needs-approval",
@@ -30,6 +96,7 @@ export function registerPhase1(
   server: McpServer,
   getClient: () => T3Client,
   getDesk: () => LaunchDesk,
+  getDelivery: () => DeliveryContext = defaultDelivery,
 ) {
   server.registerTool(
     "t3_status",
@@ -70,9 +137,10 @@ export function registerPhase1(
           serverVersion: env.serverVersion,
           authOk: auth,
           ...summary,
+          connector: connectorStatus(client, getDelivery),
         });
       } catch (e) {
-        return errorResult(e);
+        return errorResult(e, { connector: safeConnectorStatus(getDelivery) });
       }
     },
   );
@@ -127,7 +195,10 @@ export function registerPhase1(
         "List agent threads in T3 Code, most recently updated first. Filter by project, " +
         "attention state (needs-approval, needs-input, plan-ready, working, error, done, idle), " +
         "or include archived threads. Each row includes the thread's attention state — what, if " +
-        "anything, it needs from the human.",
+        "anything, it needs from the human. Paged: when hasMore is true, call again with " +
+        "cursor=nextCursor (same filters) until it is false; total is the number of matching " +
+        "threads. For a complete fleet check use order \"created\" (stable while threads update) " +
+        "and also read changedSinceFirstPage on the last page.",
       inputSchema: {
         projectId: z.string().optional().describe("Only threads in this project"),
         attention: z
@@ -135,24 +206,63 @@ export function registerPhase1(
           .optional()
           .describe("Only threads in this attention state"),
         includeArchived: z.boolean().optional().describe("Include archived threads (default false)"),
-        limit: z.number().int().min(1).max(100).optional().describe("Max rows (default 25)"),
+        limit: z.number().int().min(1).max(100).optional().describe("Rows per page (default 25)"),
+        cursor: z.string().optional().describe("nextCursor from the previous page (same filters and order)"),
+        order: z
+          .enum(["updated", "created"])
+          .optional()
+          .describe("updated: most recently updated first (default). created: newest first by creation time, stable while threads update"),
       },
     },
     async (args) => {
       try {
         const shell = await getClient().shell({ includeArchived: args.includeArchived === true });
         const projectsById = new Map(shell.projects.map((p) => [p.id, p]));
-        const limit = args.limit ?? 25;
-        const rows = shell.threads
-          .filter((t) => (args.includeArchived ? true : !t.archivedAt))
+        const order = args.order ?? "updated";
+        const inScope = shell.threads.filter((t) => (args.includeArchived ? true : !t.archivedAt));
+        const matching = inScope
           .filter((t) => (args.projectId ? t.projectId === args.projectId : true))
-          .filter((t) => (args.attention ? attentionOf(t) === (args.attention as Attention) : true))
-          .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-          .slice(0, limit)
-          .map((t) => threadRow(t, projectsById));
-        const total = shell.threads.filter((t) => (args.includeArchived ? true : !t.archivedAt))
-          .length;
-        return jsonResult({ shown: rows.length, matchedOf: total, threads: rows });
+          .filter((t) => (args.attention ? attentionOf(t) === (args.attention as Attention) : true));
+        const page = paginate(
+          matching.map((t) => ({
+            row: t,
+            rank: [order === "created" ? ms(t.createdAt) : ms(t.updatedAt)],
+            id: t.id,
+            updatedMs: ms(t.updatedAt),
+          })),
+          {
+            limit: args.limit ?? 25,
+            cursor: args.cursor,
+            query: queryHash({
+              tool: "list_threads",
+              projectId: args.projectId ?? null,
+              attention: args.attention ?? null,
+              includeArchived: args.includeArchived === true,
+              order,
+            }),
+            snapshotSequence: shell.snapshotSequence,
+            allUpdated: inScope.map((t) => ({ id: t.id, updatedMs: ms(t.updatedAt) })),
+          },
+        );
+        return jsonResult({
+          shown: page.rows.length,
+          // Kept for older callers: every thread in scope (archived only with includeArchived), not the matches.
+          matchedOf: inScope.length,
+          total: page.total,
+          returnedSoFar: page.returnedSoFar,
+          hasMore: page.hasMore,
+          nextCursor: page.nextCursor,
+          order,
+          snapshotSequence: page.snapshotSequence,
+          ...(args.cursor
+            ? {
+                firstSnapshotSequence: page.firstSnapshotSequence,
+                consistentSinceFirstPage: page.consistentSinceFirstPage,
+                changedSinceFirstPage: page.changedSinceFirstPage,
+              }
+            : {}),
+          threads: page.rows.map((t) => threadRow(t, projectsById)),
+        });
       } catch (e) {
         return errorResult(e);
       }
@@ -251,12 +361,18 @@ export function registerPhase1(
           .boolean()
           .optional()
           .describe("True only when Ned asked for this restart himself in your session (goes first; logged)"),
+        idempotencyKey: z
+          .string()
+          .min(8)
+          .max(200)
+          .optional()
+          .describe("Any unique string for this message. Retrying with the same key never sends it twice (T3 answers from its receipt)"),
       },
     },
     async (args) => {
       try {
         const client = getClient();
-        const snap = await client.thread(args.threadId, { turnLimit: 1 });
+        const snap = await client.thread(args.threadId, { turnLimit: 1, window: "bounded" });
         const t = snap.thread;
         const live = LIVE_SESSION_STATES.includes(t.session?.status ?? "");
         let gate: { desk: LaunchDesk; id: string; claim: string } | undefined;
@@ -294,27 +410,51 @@ export function registerPhase1(
         if (args.interactionMode && args.interactionMode !== t.interactionMode) {
           pre.push(commands.setInteractionMode(t.id, args.interactionMode));
         }
-        let result: { sequence: number };
+        // An idempotencyKey fixes the command and message ids, so a retry of this call is
+        // answered from T3's receipt instead of sending the message twice.
+        const ids = args.idempotencyKey
+          ? {
+              commandId: stableId("send_message/command", t.id, args.idempotencyKey),
+              messageId: stableId("send_message/message", t.id, args.idempotencyKey),
+            }
+          : {};
+        const command = commands.messageDispatch({ threadId: t.id, text: args.message, ...ids });
+        let sent: MessageSendResult;
         // Only the message can start a provider; a failed mode command launched nothing.
         let atMessage = false;
         try {
           for (const c of pre) await client.dispatch(c);
           atMessage = true;
-          result = await client.dispatch(commands.messageDispatch({ threadId: t.id, text: args.message }));
+          const { journal, parked } = getDelivery();
+          sent = await dispatchMessage({ client, journal, parked, readTimeoutMs: client.timeouts?.httpMs, rpcTimeoutMs: client.timeouts?.rpcMs }, command, sha256(args.message));
         } catch (e) {
           if (!gate) throw e;
           throw failLaunch(gate.desk, gate.id, gate.claim, e, { sent: atMessage && !wasNotSent(e), threadId: t.id, tool: "send_message" });
         }
+        if (sent.outcome !== "delivered") {
+          if (gate) {
+            const err = new Error(`send ${sent.outcome} (${sent.reason})`);
+            failLaunch(gate.desk, gate.id, gate.claim, err, { sent: sent.outcome === "unknown", threadId: t.id, tool: "send_message" });
+          }
+          return uncertainSendResult(t.id, sent);
+        }
         const warning = gate ? recordLaunch(gate.desk, gate.id, gate.claim, t.id) : undefined;
+        const busy = t.session?.activeTurnId ? true : false;
         return jsonResult({
           ...(warning ? { warning } : {}),
           sent: true,
+          outcome: sent.outcome,
+          reason: sent.reason,
           threadId: t.id,
           threadTitle: t.title,
-          sequence: result.sequence,
+          sequence: sent.sequence,
+          commandId: sent.commandId,
+          messageId: sent.messageId,
           ...(gate ? { queue_entry: gate.id, restarted: true } : {}),
-          wasBusy: t.session?.activeTurnId ? true : false,
-          note: "Turn started. Use wait_for_turn or get_thread to read the reply.",
+          wasBusy: busy,
+          note: busy
+            ? "The thread was busy: T3 queued the message behind the active run. Use queue_status to see it."
+            : "Turn started. Use wait_for_turn or get_thread to read the reply.",
         });
       } catch (e) {
         return errorResult(e);

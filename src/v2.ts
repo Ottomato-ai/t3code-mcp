@@ -413,13 +413,13 @@ export function detailFromV2(raw: V2ThreadDetailSnapshot, opts: DetailOptions): 
 const CREATION = { createdBy: "user", creationSource: "mcp" } as const;
 
 export const commands = {
-  messageDispatch(a: { threadId: string; text: string }) {
+  messageDispatch(a: { threadId: string; text: string; commandId?: string; messageId?: string }) {
     return {
       type: "message.dispatch",
       ...CREATION,
-      commandId: newId(),
+      commandId: a.commandId ?? newId(),
       threadId: a.threadId,
-      messageId: newId(),
+      messageId: a.messageId ?? newId(),
       text: a.text,
       attachments: [],
       // The server queues a start_immediately message behind an active run.
