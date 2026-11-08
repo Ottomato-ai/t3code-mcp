@@ -3,6 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Tools that send through the default delivery journal must never write to the real state
+// folder: every test process gets its own temporary one.
+if (!process.env.T3_DELIVERY_STATE_DIR) {
+  process.env.T3_DELIVERY_STATE_DIR = mkdtempSync(join(tmpdir(), "t3code-mcp-journal-"));
+  process.on("exit", () => rmSync(process.env.T3_DELIVERY_STATE_DIR, { recursive: true, force: true }));
+}
+
 export const T0 = Date.parse("2026-10-12T00:00:00Z");
 export const MIN = 60_000;
 export const HOUR = 60 * MIN;

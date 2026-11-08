@@ -4,6 +4,7 @@ import type { T3Client } from "../client.js";
 import { attentionOf, pendingRequests } from "../model.js";
 import type { Attention, ThreadShell } from "../model.js";
 import { errorResult, jsonResult, relTime, stripForVoice, threadRow, truncate } from "../format.js";
+import { ms, paginate, queryHash } from "../paging.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,7 +43,7 @@ export function registerPhase3(server: McpServer, getClient: () => T3Client) {
     },
     async (args) => {
       try {
-        const snap = await getClient().thread(args.threadId, { turnLimit: 8 });
+        const snap = await getClient().thread(args.threadId, { turnLimit: 8, window: "bounded" });
         const t = snap.thread;
         const attention = attentionOf(t);
         const pending = pendingRequests(t.activities ?? []);
@@ -168,10 +169,13 @@ export function registerPhase3(server: McpServer, getClient: () => T3Client) {
       title: "Search threads",
       description:
         "Find threads by words from the title, project name, or branch (case-insensitive " +
-        "substring match on each word). Searches active and archived threads.",
+        "substring match on each word). Searches active and archived threads. Paged: when " +
+        "hasMore is true, call again with cursor=nextCursor and the same query; total is the " +
+        "number of matching threads.",
       inputSchema: {
         query: z.string().min(1),
-        limit: z.number().int().min(1).max(50).optional().describe("Default 10"),
+        limit: z.number().int().min(1).max(50).optional().describe("Rows per page (default 10)"),
+        cursor: z.string().optional().describe("nextCursor from the previous page (same query)"),
       },
     },
     async (args) => {
@@ -179,7 +183,7 @@ export function registerPhase3(server: McpServer, getClient: () => T3Client) {
         const shell = await getClient().shell({ includeArchived: true });
         const projectsById = new Map(shell.projects.map((p) => [p.id, p]));
         const words = args.query.toLowerCase().split(/\s+/).filter(Boolean);
-        const matches = shell.threads
+        const matching = shell.threads
           .map((t) => {
             const hay = [
               t.title ?? "",
@@ -191,13 +195,32 @@ export function registerPhase3(server: McpServer, getClient: () => T3Client) {
             const hits = words.filter((w) => hay.includes(w)).length;
             return { t, hits };
           })
-          .filter((m) => m.hits === words.length || (words.length > 2 && m.hits >= words.length - 1))
-          .sort(
-            (a, b) => b.hits - a.hits || Date.parse(b.t.updatedAt) - Date.parse(a.t.updatedAt),
-          )
-          .slice(0, args.limit ?? 10)
-          .map((m) => threadRow(m.t, projectsById));
-        return jsonResult({ matches: matches.length, threads: matches });
+          .filter((m) => m.hits === words.length || (words.length > 2 && m.hits >= words.length - 1));
+        const page = paginate(
+          matching.map((m) => ({ row: m.t, rank: [m.hits, ms(m.t.updatedAt)], id: m.t.id, updatedMs: ms(m.t.updatedAt) })),
+          {
+            limit: args.limit ?? 10,
+            cursor: args.cursor,
+            query: queryHash({ tool: "search_threads", words }),
+            snapshotSequence: shell.snapshotSequence,
+            allUpdated: shell.threads.map((t) => ({ id: t.id, updatedMs: ms(t.updatedAt) })),
+          },
+        );
+        return jsonResult({
+          matches: page.rows.length,
+          total: page.total,
+          returnedSoFar: page.returnedSoFar,
+          hasMore: page.hasMore,
+          nextCursor: page.nextCursor,
+          snapshotSequence: page.snapshotSequence,
+          ...(args.cursor
+            ? {
+                consistentSinceFirstPage: page.consistentSinceFirstPage,
+                changedSinceFirstPage: page.changedSinceFirstPage,
+              }
+            : {}),
+          threads: page.rows.map((t) => threadRow(t, projectsById)),
+        });
       } catch (e) {
         return errorResult(e);
       }

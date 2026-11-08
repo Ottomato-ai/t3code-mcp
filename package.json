@@ -1,6 +1,6 @@
 {
   "name": "t3code-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for controlling a running T3 Code instance: list threads, read history, send messages, handle approvals.",
   "type": "module",
   "bin": {
@@ -10,10 +10,11 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/build-info.mjs",
     "dev": "tsc --watch",
-    "test": "tsc && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs && node --test test/headroom.test.mjs && node --test test/effort.test.mjs && node --test test/v2-map.test.mjs && node --test test/v2-commands.test.mjs && node --test test/v2-client.test.mjs && node --test test/v2-tools.test.mjs && node --test test/node-pin.test.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "test": "tsc && node scripts/build-info.mjs && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs && node --test test/headroom.test.mjs && node --test test/effort.test.mjs && node --test test/v2-map.test.mjs && node --test test/v2-commands.test.mjs && node --test test/v2-client.test.mjs && node --test test/v2-tools.test.mjs && node --test test/node-pin.test.mjs && node --test test/config.test.mjs && node --test test/paging.test.mjs && node --test test/list-threads.test.mjs && node --test test/malformed.test.mjs && node --test test/queue.test.mjs && node --test test/journal.test.mjs && node --test test/send-now.test.mjs && node --test test/send-message.test.mjs && node --test test/build-info.test.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "verify-deploy": "node scripts/verify-deploy.mjs"
   },
   "engines": {
     "node": ">=22.23.4 <23 || >=24.22.1 <25 || >=26.12.1"

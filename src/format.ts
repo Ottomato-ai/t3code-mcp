@@ -89,7 +89,8 @@ export function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 1) }] };
 }
 
-export function errorResult(e: unknown) {
+export function errorResult(e: unknown, extra?: Record<string, unknown>) {
   const message = e instanceof Error ? e.message : String(e);
-  return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
+  const tail = extra && Object.values(extra).some((v) => v !== undefined) ? `\n${JSON.stringify(extra, null, 1)}` : "";
+  return { content: [{ type: "text" as const, text: `Error: ${message}${tail}` }], isError: true };
 }

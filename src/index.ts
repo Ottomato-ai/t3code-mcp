@@ -9,8 +9,11 @@ import { registerPhase3 } from "./tools/phase3.js";
 import { registerLaunchDesk } from "./tools/desk.js";
 import { LaunchDesk } from "./desk/desk.js";
 import { startHttp } from "./http.js";
+import { registerQueueTools } from "./tools/queue.js";
+import { defaultDelivery } from "./delivery/context.js";
+import { connectorVersion } from "./build-info.js";
 
-const VERSION = "0.1.0";
+const VERSION = connectorVersion();
 
 // One launch desk per process, shared by every MCP session (HTTP mode makes one server per request).
 let desk: LaunchDesk | undefined;
@@ -21,10 +24,11 @@ export function createServer(): McpServer {
   // Lazy so the MCP server starts (and t3_status can explain) even when T3 is down.
   let client: T3Client | undefined;
   const getClient = () => (client ??= makeClient());
-  registerPhase1(server, getClient, getDesk);
+  registerPhase1(server, getClient, getDesk, defaultDelivery);
   registerPhase2(server, getClient, getDesk);
   registerPhase3(server, getClient);
   registerLaunchDesk(server, getClient, getDesk);
+  registerQueueTools(server, getClient, defaultDelivery);
   return server;
 }
 
@@ -50,7 +54,13 @@ Env:
   MCP_HTTP_TOKEN  bearer token clients must present in --http mode
   T3_LAUNCH_CAP   max live T3 threads across all lanes (default 15)
   T3_LAUNCH_GRANT_MINUTES  minutes a granted launch slot is held (default 10)
-  T3_LAUNCH_DESK_DIR       launch queue folder (default %LOCALAPPDATA%/OttoSystems/launch-desk)`,
+  T3_LAUNCH_DESK_DIR       launch queue folder (default %LOCALAPPDATA%/OttoSystems/launch-desk)
+  T3_HTTP_TIMEOUT_MS       HTTP read timeout, 100..600000 (default 30000)
+  T3_PROBE_TIMEOUT_MS      liveness probe timeout (default 3000)
+  T3_RPC_TIMEOUT_MS        WebSocket RPC (command) timeout (default 30000)
+  T3_PARKED_THREADS        thread ids whose queues are never started or released
+  T3_DELIVERY_STATE_DIR    delivery journal folder (default %LOCALAPPDATA%/OttoSystems/t3code-mcp/delivery,
+                           else $XDG_STATE_HOME or ~/.local/state /t3code-mcp/delivery)`,
     );
     return;
   }

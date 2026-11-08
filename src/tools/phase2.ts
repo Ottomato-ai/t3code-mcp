@@ -77,7 +77,7 @@ export function registerPhase2(
           };
           if (attention === "needs-approval" || attention === "needs-input") {
             try {
-              const detail = await client.thread(t.id, { turnLimit: 3 });
+              const detail = await client.thread(t.id, { turnLimit: 3, window: "bounded" });
               item.requests = pendingRequests(detail.thread.activities ?? []);
             } catch {
               item.requests = "unavailable";
@@ -310,7 +310,7 @@ export function registerPhase2(
     async (args) => {
       try {
         const client = getClient();
-        const snap = await client.thread(args.threadId, { turnLimit: 1 });
+        const snap = await client.thread(args.threadId, { turnLimit: 1, window: "bounded" });
         const runId = snap.thread.activeRunId;
         if (!runId) {
           return errorResult(new Error(`Thread ${args.threadId} has no active run to interrupt.`));
@@ -336,7 +336,7 @@ export function registerPhase2(
       try {
         // Protocol 2 has no session stop: detach every provider session, as the T3 UI does.
         const client = getClient();
-        const snap = await client.thread(args.threadId, { turnLimit: 1 });
+        const snap = await client.thread(args.threadId, { turnLimit: 1, window: "bounded" });
         const sessionIds = snap.thread.providerSessionIds ?? [];
         if (sessionIds.length === 0) {
           return jsonResult({ stopped: false, note: "The thread has no live provider session; nothing to stop." });
@@ -372,7 +372,7 @@ export function registerPhase2(
         const deadline = Date.now() + (args.timeoutSeconds ?? 120) * 1000;
         let last: Awaited<ReturnType<typeof client.thread>> | undefined;
         for (;;) {
-          last = await client.thread(args.threadId, { turnLimit: 2 });
+          last = await client.thread(args.threadId, { turnLimit: 2, window: "bounded" });
           const t = last.thread;
           const pending = pendingRequests(t.activities ?? []);
           const turnState = t.latestTurn?.state;

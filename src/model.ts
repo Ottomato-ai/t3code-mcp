@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // Shapes the tools read. These mirror the T3 Code V1 wire shapes
 // (packages/contracts/src/orchestration.ts). Since orchestration protocol 2, the client maps
 // V2 snapshots into them (see v2.ts). Parsed defensively: unknown fields ignored, optional
@@ -187,4 +188,14 @@ export function pendingRequests(activities: Activity[]): PendingRequest[] {
 
 export function newId(): string {
   return crypto.randomUUID();
+}
+
+/**
+ * A UUID-shaped id derived from its inputs (SHA-256, version nibble 8): the same inputs always
+ * give the same id, so a retried command carries the same commandId and messageId.
+ */
+export function stableId(namespace: string, ...parts: string[]): string {
+  const hex = createHash("sha256").update(["t3code-mcp", namespace, ...parts].join("\n")).digest("hex");
+  const variant = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
