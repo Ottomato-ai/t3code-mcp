@@ -40,6 +40,8 @@ claude mcp add --scope user t3code -- node /Users/thomascrundwell/Documents/proj
 
 **Launch desk (cap and queue)** — `create_thread` (now gated, requires `lane`), `launch_wait`, `launch_queue`, `launch_cancel`, `launch_queue_move`; see below
 
+**Queued messages** — `list_queued_messages` (one thread, or every thread with an active run), `cancel_queued_message`, `edit_queued_message`: see, change or remove a message T3 holds behind a busy thread's running turn before it fires. Cancel and edit need `lane` and are logged to the launch desk `events.jsonl`; cancel or edit only messages you sent.
+
 **Hands-free interaction** — `pending_actions` (cross-thread "what needs me?" inbox), `respond_to_approval`, `respond_to_user_input`
 
 **Voice layer** — `thread_digest` and `workspace_digest` (TTS-friendly `spoken` summaries), `wait_for_change` (long-poll until anything needs attention)
@@ -79,7 +81,7 @@ Clients connect to `http://<machine>:3774/` with `Authorization: Bearer <secret>
 ## Testing
 
 - `pnpm test` — builds, then runs the unit and tool tests with `node --test`, one file at a time (no live T3 needed).
-- `node scripts/mutate.mjs [results-file] [label-filter]` — mutation check of the launch desk: applies one mutant at a time to the built `dist` and runs the tests; every mutant must be killed (run `pnpm build` first).
+- `node scripts/mutate.mjs [results-file] [label-filter]` — mutation check of the launch desk and the queued-message tools (labels starting `Q `, filter `"Q "`): applies one mutant at a time to the built `dist` and runs the tests; every mutant must be killed (run `pnpm build` first).
 - CI (`.github/workflows/ci.yml`) runs install, build and `pnpm test` on Windows and Ubuntu for pull requests and pushes to `main`.
 - `pnpm smoke` — read-only pass over every query tool against the live server.
 - `node scripts/smoke.mjs --mutate <projectId>` — additionally runs the full write loop (create disposable thread → agent replies → follow-up message → rename → stop → archive). Use a scratch project; "t3code-mcp scratch" (`/tmp/t3code-mcp-scratch`) exists for this.

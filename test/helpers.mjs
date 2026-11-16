@@ -2,6 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { T3Error } from "../dist/client.js";
 
 export const T0 = Date.parse("2026-10-12T00:00:00Z");
 export const MIN = 60_000;
@@ -41,6 +42,21 @@ export function fakeClient(opts = {}) {
     /** Provider session ids per thread id (thread() detail), for stop_thread. */
     sessionIds: opts.sessionIds ?? {},
     dispatchDelayMs: opts.dispatchDelayMs ?? 0,
+    /** V2 thread details per thread id for queuedMessages(); a missing id is an unknown thread. */
+    details: opts.details ?? {},
+    /** Thread ids passed to queuedMessages(), in call order. */
+    queueReads: [],
+    /** Error dispatch() throws instead of applying the command. */
+    dispatchError: opts.dispatchError ?? null,
+    /** False: queue commands are recorded but the stored detail does not change. */
+    applyQueue: opts.applyQueue ?? true,
+    /** queuedMessages() fails from this read on (1-based); null never. */
+    failReadFrom: opts.failReadFrom ?? null,
+    /** Shell session status per thread id (default running) and archived thread ids. */
+    shellStatuses: opts.shellStatuses ?? {},
+    archived: opts.archived ?? [],
+    /** Shell updatedAt per thread id (default T0). */
+    updatedAt: opts.updatedAt ?? {},
     project: {
       id: "p1",
       title: "Scratch",
@@ -78,7 +94,11 @@ export function fakeClient(opts = {}) {
         snapshotSequence: seq,
         updatedAt: new Date().toISOString(),
         projects: [state.project, state.project2],
-        threads: state.running.map((id) => threadShell(id, "running")),
+        threads: state.running.map((id) => ({
+          ...threadShell(id, state.shellStatuses[id] ?? "running"),
+          ...(state.archived.includes(id) ? { archivedAt: new Date(T0).toISOString() } : {}),
+          ...(state.updatedAt[id] ? { updatedAt: state.updatedAt[id] } : {}),
+        })),
       };
     },
     async thread(id) {
@@ -94,9 +114,27 @@ export function fakeClient(opts = {}) {
         },
       };
     },
+    async queuedMessages(id) {
+      state.queueReads.push(id);
+      if (state.failReadFrom !== null && state.queueReads.length >= state.failReadFrom) {
+        throw new T3Error("T3 API read failed: HTTP 500", { status: 500 });
+      }
+      const d = state.details[id];
+      if (!d) throw new T3Error(`No thread ${id} in T3. Find the id with list_threads or list_queued_messages.`, { status: 404 });
+      return structuredClone(d);
+    },
     async dispatch(cmd) {
       if (state.dispatchDelayMs) await new Promise((r) => setTimeout(r, state.dispatchDelayMs));
+      if (state.dispatchError) throw state.dispatchError;
       state.dispatched.push(cmd);
+      // Queue commands change the stored detail the way the server does.
+      const d = state.applyQueue ? state.details[cmd.threadId] : undefined;
+      const run = d?.projection.runs.find((r) => r.id === cmd.runId);
+      if (cmd.type === "queued-run.cancel" && run) run.status = "cancelled";
+      if (cmd.type === "queued-run.edit" && run) {
+        const m = d.projection.messages.find((x) => x.id === run.userMessageId);
+        if (m) m.text = cmd.text;
+      }
       return { sequence: ++seq };
     },
   };

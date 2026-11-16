@@ -21,6 +21,9 @@ const T = "dist/tools/desk.js", P1 = "dist/tools/phase1.js", P2 = "dist/tools/ph
 const U = "dist/desk/untrusted.js";
 const C = "dist/client.js";
 const H = "dist/desk/headroom.js";
+const V = "dist/v2.js", Q = "dist/tools/queue.js";
+// Queued-message mutants run only the tests that cover that code (5th element).
+const QT = ["test/v2-queue-map.test.mjs", "test/v2-commands.test.mjs", "test/v2-client.test.mjs", "test/queue-tools.test.mjs"];
 
 // [file, exact text (must occur once), replacement, label]
 export const MUTANTS = [
@@ -326,6 +329,53 @@ export const MUTANTS = [
   [T, `                cap_reason: v.capDecision.reason,`, ``, "F45 queue cap_reason"],
   [T, `                        at: v.headroom.at === null ? null : new Date(v.headroom.at).toISOString(),`, `                        at: v.headroom.at,`, "F45 queue headroom at"],
   [T, `                        allowed_extra: v.headroom.allowedExtra,`, ``, "F45 queue headroom allowed_extra"],
+  // queued messages: order and text as the server reads them
+  [V, `.filter((r) => r.status === "queued")\n        .map((r) => {`, `.filter((r) => r.status !== "cancelled")\n        .map((r) => {`, "Q only queued runs", QT],
+  [V, `const order = (r) => r.queuePosition ?? r.ordinal ?? 0;`, `const order = (r) => r.ordinal ?? 0;`, "Q queuePosition first", QT],
+  [V, `const order = (r) => r.queuePosition ?? r.ordinal ?? 0;`, `const order = (r) => r.queuePosition ?? 0;`, "Q ordinal fallback", QT],
+  [V, `Number(b.automatic) - Number(a.automatic) || order`, `order`, "Q automatic first", QT],
+  [V, `order(a.r) - order(b.r))`, `order(b.r) - order(a.r))`, "Q order direction", QT],
+  [V, `        position: i + 1,`, `        position: i,`, "Q position 1-based", QT],
+  [V, `(r.userMessageId ? messages.find((m) => m.id === r.userMessageId) : undefined) ??`, `undefined ??`, "Q message by userMessageId", QT],
+  [V, `messages.find((m) => m.runId === r.id && m.role === "user")`, `messages.find((m) => m.runId === r.id)`, "Q fallback user role", QT],
+  [V, `        queuedAt: r.requestedAt ?? m?.createdAt ?? null,`, `        queuedAt: m?.createdAt ?? null,`, "Q queuedAt from run", QT],
+  [V, `        queuedAt: r.requestedAt ?? m?.createdAt ?? null,`, `        queuedAt: r.requestedAt ?? null,`, "Q queuedAt fallback", QT],
+  [V, `automatic: m?.delegatedCompletion !== undefined`, `automatic: false`, "Q automatic flag", QT],
+  [V, `        creationSource: m?.creationSource ?? null,`, `        creationSource: null,`, "Q sender source", QT],
+  [V, `type: "queued-run.cancel", commandId`, `type: "queued-run.delete", commandId`, "Q cancel command type", QT],
+  [V, `        type: "queued-run.edit",`, `        type: "queued-run.update",`, "Q edit command type", QT],
+  [V, `        runId,\n        text,\n    }),`, `        runId,\n        message: text,\n    }),`, "Q edit text field", QT],
+  [C, `if (e instanceof T3Error && e.status === 404) {`, `if (false) {`, "Q unknown thread message", QT],
+  [C, `{ status: res.status });`, `{});`, "Q error status kept", QT],
+  [C, `if (!isV2Detail(raw)) {\n            throw new T3Error("Queued`, `if (false) {\n            throw new T3Error("Queued`, "Q V1 refused", QT],
+  // queued messages: tools
+  [Q, `export const LIST_THREAD_CAP = 25;`, `export const LIST_THREAD_CAP = 26;`, "Q list cap", QT],
+  [Q, `export const TEXT_CHARS = 300;`, `export const TEXT_CHARS = 301;`, "Q text chars", QT],
+  [Q, `export const LOG_CHARS = 120;`, `export const LOG_CHARS = 121;`, "Q log chars", QT],
+  [Q, `    if (chars.length <= max)`, `    if (chars.length < max)`, "Q clip bound", QT],
+  [Q, `const ACTIVE_SESSION = ["running", "starting"];`, `const ACTIVE_SESSION = ["running"];`, "Q starting counts", QT],
+  [Q, `const ACTIVE_SESSION = ["running", "starting"];`, `const ACTIVE_SESSION = ["running", "starting", "ready"];`, "Q ready skipped", QT],
+  [Q, `.filter((t) => !t.archivedAt && hasActiveRun(t))`, `.filter((t) => hasActiveRun(t))`, "Q archived skipped", QT],
+  [Q, `.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));`, `;`, "Q recent threads first", QT],
+  [Q, `                    if (args.threadId)\n                        throw e;`, `                    if (false)\n                        throw e;`, "Q one-thread error is the answer", QT],
+  [Q, `            groups.sort((a, b) => oldest(a.queue) - oldest(b.queue));`, ``, "Q longest wait first", QT],
+  [Q, `ofThreads > LIST_THREAD_CAP;`, `ofThreads >= LIST_THREAD_CAP;`, "Q capped bound", QT],
+  [Q, `                messages: rows.slice(0, limit),`, `                messages: rows,`, "Q limit rows", QT],
+  [Q, `...(count > limit ? { shown: limit } : {}),`, `...(count >= limit ? { shown: limit } : {}),`, "Q shown bound", QT],
+  [Q, `    if (run.status !== "queued") {`, `    if (false) {`, "Q state check", QT],
+  [Q, `const STARTED = ["preparing", "starting", "running", "waiting"];`, `const STARTED = ["preparing", "starting", "waiting"];`, "Q running points to interrupt", QT],
+  [Q, `        throw new Error(\`No run \${runId} on thread`, `        return { runId, text: "", position: 0 };\n        throw new Error(\`No run \${runId} on thread`, "Q unknown run", QT],
+  [Q, `            if (args.message.trim().length === 0) {`, `            if (args.message.length === 0) {`, "Q blank edit refused", QT],
+  [Q, `            log({ type: "queue_cancel", ...base, sequence });`, ``, "Q cancel logged", QT],
+  [Q, `            log({ type: "queue_edit", ...base, sequence });`, ``, "Q edit logged", QT],
+  [Q, `                log({ type: "queue_cancel_failed", ...base, sent, error: message(e).slice(0, 300) });`, ``, "Q cancel failure logged", QT],
+  [Q, `                log({ type: "queue_edit_failed", ...base, sent, error: message(e).slice(0, 300) });`, ``, "Q edit failure logged", QT],
+  [Q, `                const sent = !wasNotSent(e);\n                log({ type: "queue_cancel_failed"`, `                const sent = true;\n                log({ type: "queue_cancel_failed"`, "Q cancel not sent", QT],
+  [Q, `                const sent = !wasNotSent(e);\n                log({ type: "queue_edit_failed"`, `                const sent = true;\n                log({ type: "queue_edit_failed"`, "Q edit not sent", QT],
+  [Q, `                    remaining: queuedMessagesFromV2(d).length,`, `                    remaining: queuedMessagesFromV2(before).length,`, "Q remaining re-read", QT],
+  [Q, `...(status === "queued" ? { warning:`, `...(false ? { warning:`, "Q cancel still queued warns", QT],
+  [Q, `                    now = m.text;\n`, ``, "Q edit shows T3 text", QT],
+  [Q, `                if (!m)\n                    warning =`, `                if (false)\n                    warning =`, "Q edit no longer queued warns", QT],
 ];
 
 function commit() {
@@ -343,7 +393,7 @@ const log = (line) => {
 
 if (OUT) writeFileSync(OUT, "");
 let killed = 0, survived = 0, invalid = 0;
-for (const [rel, find, replace, label] of MUTANTS) {
+for (const [rel, find, replace, label, tests = TESTS] of MUTANTS) {
   if (FILTER && !label.includes(FILTER)) continue;
   for (let c = commit(); typeof c === "number" && c >= 85; c = commit()) {
     console.log(`commit ${c}% >= 85, waiting`);
@@ -361,7 +411,7 @@ for (const [rel, find, replace, label] of MUTANTS) {
   writeFileSync(file, text.replace(find, replace));
   let by = null;
   try {
-    for (const t of TESTS) {
+    for (const t of tests) {
       const r = spawnSync(process.execPath, ["--test", "--test-timeout=30000", t], { cwd: ROOT, encoding: "utf8", timeout: 240000 });
       if (r.status !== 0) {
         const m = /✖ (?!failing tests)(.+?) \(\d/.exec(r.stdout ?? "");

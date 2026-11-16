@@ -241,3 +241,29 @@ export function attachWs(server, onMessage) {
     socket.on("error", () => {});
   });
 }
+
+/**
+ * A busy thread with a queue: 1 running run, 3 queued runs (send order by queuePosition, not by
+ * requestedAt: run-q8 was moved to the front), 1 cancelled run. Queued messages are linked by
+ * run.userMessageId, as the server reads them.
+ */
+export const LONG_TEXT = "x".repeat(350);
+export function v2QueueDetail() {
+  return v2Detail({
+    thread: { id: "t-q", title: "busy thread", status: "running", activeRunId: "run-5", activityRunStatus: "running" },
+    runs: [
+      v2Run({ id: "run-4", ordinal: 4, status: "cancelled", userMessageId: "m-4", queuePosition: null, requestedAt: iso(50 * MIN) }),
+      v2Run({ id: "run-5", ordinal: 5, status: "running", userMessageId: "m-5", queuePosition: null, requestedAt: iso(40 * MIN), completedAt: null }),
+      v2Run({ id: "run-q6", ordinal: 6, status: "queued", userMessageId: "m-q6", queuePosition: 2, requestedAt: iso(30 * MIN), startedAt: null, completedAt: null }),
+      v2Run({ id: "run-q7", ordinal: 7, status: "queued", userMessageId: "m-q7", queuePosition: 3, requestedAt: iso(20 * MIN), startedAt: null, completedAt: null }),
+      v2Run({ id: "run-q8", ordinal: 8, status: "queued", userMessageId: "m-q8", queuePosition: 1, requestedAt: iso(10 * MIN), startedAt: null, completedAt: null }),
+    ],
+    messages: [
+      v2Message({ id: "m-4", runId: "run-4", text: "cancelled ask", createdAt: iso(50 * MIN) }),
+      v2Message({ id: "m-5", runId: "run-5", text: "running ask", createdAt: iso(40 * MIN) }),
+      v2Message({ id: "m-q6", runId: "run-q6", text: "RESUME now", creationSource: "mcp", createdAt: iso(30 * MIN) }),
+      v2Message({ id: "m-q7", runId: "run-q7", text: LONG_TEXT, creationSource: "mcp", createdAt: iso(20 * MIN) }),
+      v2Message({ id: "m-q8", runId: "run-q8", text: "from the web <b>ui</b>", creationSource: "web", createdAt: iso(10 * MIN) }),
+    ],
+  });
+}

@@ -8,15 +8,19 @@ import {
   isV2Detail,
   isV2Shell,
   shellFromV2,
+  type V2ThreadDetailSnapshot,
   type V2ThreadShell,
 } from "./v2.js";
 
 export class T3Error extends Error {
   /** True when the request never reached the server (connection refused): nothing was sent. */
   readonly notSent: boolean;
-  constructor(message: string, opts: { notSent?: boolean } = {}) {
+  /** HTTP status T3 answered with, when it answered with an error status. */
+  readonly status: number | undefined;
+  constructor(message: string, opts: { notSent?: boolean; status?: number } = {}) {
     super(message);
     this.notSent = opts.notSent ?? false;
+    this.status = opts.status;
   }
 }
 
@@ -83,7 +87,7 @@ export class T3Client {
     }
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new T3Error(`T3 API ${path} failed: HTTP ${res.status} ${body.slice(0, 500)}`);
+      throw new T3Error(`T3 API ${path} failed: HTTP ${res.status} ${body.slice(0, 500)}`, { status: res.status });
     }
     return (await res.json()) as T;
   }
@@ -130,6 +134,30 @@ export class T3Client {
     } catch (e) {
       throw new T3Error((e as Error).message);
     }
+  }
+
+  /**
+   * The raw V2 thread detail, for the queued-message tools (they need runs and messages as the
+   * server keeps them). Protocol 2 only: a V1 server has no queued runs to read.
+   */
+  async queuedMessages(threadId: string): Promise<V2ThreadDetailSnapshot> {
+    let raw: unknown;
+    try {
+      raw = await this.req<unknown>(`/api/orchestration/threads/${encodeURIComponent(threadId)}`);
+    } catch (e) {
+      if (e instanceof T3Error && e.status === 404) {
+        throw new T3Error(`No thread ${threadId} in T3. Find the id with list_threads or list_queued_messages.`, {
+          status: 404,
+        });
+      }
+      throw e;
+    }
+    if (!isV2Detail(raw)) {
+      throw new T3Error(
+        "Queued messages are not supported by this T3 server: it does not speak orchestration protocol 2. Update T3 Code.",
+      );
+    }
+    return raw;
   }
 
   /** Send one orchestration command (protocol 2: WebSocket RPC orchestration.dispatchCommand). */

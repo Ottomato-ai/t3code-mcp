@@ -73,3 +73,15 @@ test("archive and unarchive keep their shape", () => {
 test("every builder makes a fresh commandId", () => {
   assert.notEqual(commands.archive("t").commandId, commands.archive("t").commandId);
 });
+
+test("queued-run.cancel names thread and run, as the T3 web client sends it", () => {
+  const c = commands.queuedRunCancel("t-1", "run-6");
+  assert.ok(isId(c.commandId));
+  assert.deepEqual({ ...c, commandId: "x" }, { type: "queued-run.cancel", commandId: "x", threadId: "t-1", runId: "run-6" });
+});
+
+test("queued-run.edit carries the new text and no attachments or context", () => {
+  const c = commands.queuedRunEdit("t-1", "run-6", "new text");
+  assert.ok(isId(c.commandId));
+  assert.deepEqual({ ...c, commandId: "x" }, { type: "queued-run.edit", commandId: "x", threadId: "t-1", runId: "run-6", text: "new text" });
+});
