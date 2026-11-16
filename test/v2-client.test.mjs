@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { T3Client, T3Error } from "../dist/client.js";
-import { attachWs, v2Shell, v2Thread, v2Detail, v2Message, iso, MIN } from "./v2-fixtures.mjs";
+import { attachWs, v2Shell, v2Thread, v2Detail, v2Message, v2QueueDetail, iso, MIN } from "./v2-fixtures.mjs";
 
 const listen = (server) => new Promise((r) => server.listen(0, "127.0.0.1", () => r(server.address().port)));
 const close = (server) => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); });
@@ -16,6 +16,9 @@ async function fakeT3(t, opts = {}) {
     seen.http.push({ url: req.url, protocol: req.headers["x-t3-orchestration-protocol"], auth: req.headers.authorization });
     if (req.headers["x-t3-orchestration-protocol"] !== "2") return res.writeHead(400).end();
     if (req.url === "/api/orchestration/shell") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(opts.shell ?? v2Shell([v2Thread()])));
+    if (req.url.startsWith("/api/orchestration/threads/") && opts.notFound) {
+      return res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ _tag: "EnvironmentResourceNotFoundError", code: "not_found", reason: "thread_not_found" }));
+    }
     if (req.url.startsWith("/api/orchestration/threads/")) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(opts.detail ?? v2Detail()));
     res.writeHead(404).end();
   });
@@ -108,4 +111,24 @@ test("the RPC times out with a T3Error when no Exit comes", async (t) => {
   const { client } = await fakeT3(t, { onRpc: () => {} });
   await assert.rejects(client.rpc("orchestration.dispatchCommand", { type: "x" }, { timeoutMs: 200 }), (e) =>
     e instanceof T3Error && e.notSent === false && /timed out/i.test(e.message));
+});
+
+test("queuedMessages returns the raw V2 detail with the protocol header", async (t) => {
+  const { client, seen } = await fakeT3(t, { detail: v2QueueDetail() });
+  const raw = await client.queuedMessages("t-q");
+  assert.equal(seen.http[0].url, "/api/orchestration/threads/t-q");
+  assert.equal(seen.http[0].protocol, "2");
+  assert.equal(raw.projection.thread.id, "t-q");
+  assert.equal(raw.projection.runs.filter((r) => r.status === "queued").length, 3);
+});
+
+test("queuedMessages on a V1 server says queued messages are not supported", async (t) => {
+  const { client } = await fakeT3(t, { detail: { snapshotSequence: 1, thread: { id: "t-1" } } });
+  await assert.rejects(client.queuedMessages("t-1"), (e) => e instanceof T3Error && /not supported/i.test(e.message) && /protocol 2/i.test(e.message));
+});
+
+test("queuedMessages on an unknown thread names the thread and how to find one", async (t) => {
+  const { client } = await fakeT3(t, { notFound: true });
+  await assert.rejects(client.queuedMessages("nope"), (e) =>
+    e instanceof T3Error && /No thread nope/.test(e.message) && /list_threads|list_queued_messages/.test(e.message) && e.status === 404);
 });
