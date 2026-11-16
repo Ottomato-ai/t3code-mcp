@@ -94,3 +94,30 @@ Why this design:
 Deviations from this plan, found in the server code (proof above):
 - The plan's step 3 orders by `requestedAt`; the server orders by `queuePosition ?? ordinal`. Live check on thread 0f5820f3: every run carries `queuePosition`.
 - The text is found by `run.userMessageId` first and `runId` + role `user` second. Both matched in the live probe.
+
+## Results (2026-11-16, builder)
+
+Tests: `pnpm test` in the worktree: 13 files, 285 tests, 0 failures. The new files are `test/v2-queue-map.test.mjs` (10) and `test/queue-tools.test.mjs` (33); `v2-commands`, `v2-client` and `helpers` were extended. Every step was RED before GREEN: missing export, method or module.
+
+Mutation gate: `node scripts/mutate.mjs <out> "Q "` ran 45 queue mutants on `dist/v2.js`, `dist/client.js` and `dist/tools/queue.js`. All 45 were killed. The first run had 44 killed and 1 survivor, "Q shown bound"; a test where `limit` equals the count now kills it.
+
+Real-input evals against the live T3 server (T3 Code desktop). They call the worktree build's tool handlers through an in-memory MCP client, with the real T3 client and the real desk `events.jsonl`. No server process was started. The token comes from the primary checkout's `.env`, which the client reads itself (cwd).
+
+1. `list_queued_messages` with no `threadId`:
+   - Checked 6 threads with an active run and found 1 queued message: thread 9df0feba "(Build) Host Guard: unattended lid-closed load + UDP/shell sampler", position 1, queued 2026-11-16T11:02:04.198Z, "user via mcp", run `run:thread:9df0feba-…:ordinal:15`, text truncated at 300.
+   - Interim helper `node tools/t3-queue.mjs list 9df0feba-…`: `runs {"completed":1,"cancelled":12,"running":1,"queued":1}`, the same run id, `requestedAt` and text start. With `threadId` the tool gives the same row.
+2. Self-test on this builder's own thread c891c48b while its turn ran:
+   - `send_message` "QUEUE EVAL, ignore this message" was queued (`wasBusy: true`).
+   - `list_queued_messages` showed it at position 1, "user via mcp".
+   - `edit_queued_message` to "QUEUE EVAL edited, ignore" returned old/new text. The list then showed the edited text (PASS).
+   - `cancel_queued_message` returned `remaining: 0`, `runStatus: "cancelled"`. The list then showed "No queued messages" (PASS). The helper agrees: `runs {"running":1,"cancelled":1}`.
+   - Only the eval's own message was touched.
+3. Error paths, live:
+   - Cancelling the same run again: `Error: Run run:thread:c891c48b-…:ordinal:2 is cancelled, not queued. Nothing to do.`
+   - Unknown thread: `Error: No thread 00000000-0000-4000-8000-000000000000 in T3. Find the id with list_threads or list_queued_messages.`
+   - Unknown run: `Error: No run run:does-not-exist on thread c891c48b-…. Call list_queued_messages with threadId c891c48b-… to see its queued runIds.`
+4. Audit trail: `events.jsonl` got `queue_edit` (11:39:13.152Z) and `queue_cancel` (11:39:13.458Z), with `thread_id`, `run_id`, `lane` and `preview`.
+
+Known limits:
+- Without `threadId`, only threads whose session is running or starting are read. A queue left paused on a thread with no active run (if T3 leaves one after an interrupt) is only seen with `threadId`.
+- There is no ownership check in T3; the tool descriptions say so.
