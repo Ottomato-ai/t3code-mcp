@@ -1,0 +1,59 @@
+# Queued messages: list, cancel, edit (2026-11-16)
+
+Ordered by Ned on 2026-11-16 ("figure out how you can either edit or remove ... messages in the queue. And it has to be part of the 15-minute checkup so that I don't have to deal with these manually"; then "Yes, build it"). Spec and plan by the Infra freeze lead. Builder: one T3 lane.
+
+## Problem
+
+`send_message` to a busy thread is queued by the T3 server. The message then waits, sometimes for hours, and can fire when it is already outdated (case: a 3:10 PM "RESUME" order still queued at 5:00 PM on thread 9df0feba). The MCP has no tool to see, change or remove queued messages, so Ned had to use the T3 UI (Send now, pencil, X).
+
+## Facts verified against the live server (T3 Code desktop, 2026-11-16, read from `resources/server.asar` and by one live call)
+
+- A queued message is a run with `status: "queued"` in `GET /api/orchestration/threads/:id` -> `projection.runs[]` (`id`, `status`, `requestedAt`). Its text is the `projection.messages[]` entry with the same `runId` and `role: "user"` (fields `text`, `createdBy`, `creationSource`, `createdAt`).
+- Web client builders (`EnvironmentCommands.*`), all sent through `orchestration.dispatchCommand`:
+  - `cancelQueuedRun` -> `{ type: "queued-run.cancel", commandId, threadId, runId }`
+  - `editQueuedRun` -> `{ type: "queued-run.edit", commandId, threadId, runId, text }` (optional `attachments`, `context`: not used here)
+  - `resumeThreadQueue` -> `{ type: "queue.resume" }` or `{ type: "queued-run.start", runId }`; `promoteQueuedRun` -> `queued-message.promote-to-steer`; `queued-run.reorder` exists. These three are out of scope.
+- Live proof: `queued-run.cancel` on thread 9df0feba, run ordinal 9, returned `{ sequence }`; the thread went from 3 queued runs to 2 and from 7 cancelled runs to 8.
+- Interim helper (to be replaced by the tools): `O:\Development\Infra\tools\t3-queue.mjs`.
+
+## Scope (build only this)
+
+Three new Phase 2 tools. No change to the output shape of any existing tool.
+
+| Tool | Params | Behavior |
+|---|---|---|
+| `list_queued_messages` | `threadId?`, `limit?` (default 20) | With `threadId`: the queued messages of that thread. Without: every non-archived thread that has an active run, checked one by one (cap 25 threads; say so when capped). Each row, human fields first: thread title, project, `position` (1 = next), `age` ("2h ago"), `queuedAt`, `sender` (`createdBy` + `creationSource`), `text` (truncated to 300 chars with `truncated: true`), then `threadId`, `runId`. Also `count` and a one-line `spoken` summary. Read-only. |
+| `cancel_queued_message` | `threadId`, `runId`, `lane` | Checks that the run exists and is `queued`, then `queued-run.cancel`. Returns the removed text preview and the remaining queue count (re-read after the command). If the run is not queued: an error that names the state and the fix (already running -> `interrupt_thread`; already cancelled or completed -> nothing to do). |
+| `edit_queued_message` | `threadId`, `runId`, `message`, `lane` | Same check, then `queued-run.edit` with `text`. Returns old and new preview (re-read after the command). Empty `message` is refused: use `cancel_queued_message`. |
+
+Rules:
+- `lane` is the caller's exact session title (same meaning as in `create_thread`). Every cancel and edit is written to the desk event log (`store.logEvent`) with `type`, `threadId`, `runId`, `lane`, text preview, time. This is the audit trail; there is no ownership check in the server, so the tool description says: cancel or edit only messages you sent; for another sender's message, tell that lane's lead.
+- Fail with instructions (SPEC principle 4): T3 down, 401, unknown thread, unknown run.
+- Text from other agents is wrapped with the existing `untrusted()` helper where the desk tools already do so.
+- No retries on dispatch errors. A command that was not sent (`wasNotSent`) says so.
+
+Out of scope: send now, steer, reorder, attachments, any UI, any change to `send_message`.
+
+## Reference products to study before coding (Design record needs at least two)
+
+1. T3 Code web client and T3's built-in MCP (source of truth for command shapes; read in `server.asar` / `app.asar`).
+2. One more harness with a message queue for a busy agent (for example Claude Code's queued prompts or Codex CLI's queued messages): how it shows, edits and removes queued input. Record what we take and what we leave.
+
+## Plan (tests first, one small commit per step)
+
+1. Branch `feat/queued-messages` in a git worktree outside the primary checkout (`O:\Development\Infra\worktrees_temp\t3code-mcp-queued-messages`, from `origin/main`). Never build or test in `O:\Development\Infra\t3code-mcp`: its `dist` is the live MCP server of every harness.
+2. Fixture: add a thread detail with 1 running run, 3 queued runs with user messages (one from `creationSource: "mcp"`, one from the web UI), 1 cancelled run, to `test/v2-fixtures.mjs`.
+3. RED then GREEN, `src/v2.ts`: pure `queuedMessagesFromV2(detail)` (order by `requestedAt`, position, sender, text) and builders `cmd.queuedRunCancel`, `cmd.queuedRunEdit`. Tests in `test/v2-map.test.mjs` and `test/v2-commands.test.mjs`.
+4. RED then GREEN, client: `client.queuedMessages(threadId)` (raw detail, protocol 2 only; a V1 server answers with a clear "not supported" error). Test in `test/v2-client.test.mjs`.
+5. RED then GREEN, tools in `src/tools/phase2.ts` (or a new `src/tools/queue.ts` if phase2 grows past a clear size): the three tools, the state checks, the event log, the error texts. Tests in `test/v2-tools.test.mjs`: happy paths, run not queued, unknown run, unknown thread, empty edit, not sent, list without `threadId` capped.
+6. Add each new test file to the `test` script if you create one. `pnpm test` green. Run `scripts/mutate.mjs` on the new code as the code-review gate does in this repo.
+7. Real-input evals against the live T3 server, from the worktree build (run the built server over stdio or call the tool handlers directly; do not touch the primary `dist`):
+   - `list_queued_messages` with no `threadId` and with a real busy thread: compare with `node O:\Development\Infra\tools\t3-queue.mjs list <threadId>`.
+   - Self-test on your own thread while your turn runs: `send_message` to your own thread id with the text "QUEUE EVAL, ignore this message" (it queues behind your running turn), list it, `edit_queued_message` to "QUEUE EVAL edited, ignore", list again and check the text, `cancel_queued_message`, list again and check it is gone. Never cancel or edit a message you did not send in this eval.
+   - Error path live: cancel the same `runId` again and record the error text.
+8. Docs: SPEC.md Phase 2 table (3 rows), README tool list, this plan's "Results" section with the eval output.
+9. PR to `Ottomato-ai/t3code-mcp` with `## Gates` (security-and-hardening, api-and-interface-design, code-review-and-quality, observability-and-instrumentation, shipping-and-launch: pass or fail with evidence), `## Real-input evals`, `## Design record` (`Designed by:`, `Reference products studied:`, `Why this design:`). Local first; CI last and only once. Do not merge: the lead reviews the full diff, reruns the tests and merges.
+
+## After merge (lead)
+
+Pull and build in the primary checkout, check one harness sees the three tools, replace the helper call in `~/.claude/CLAUDE.md` with the tool names, tell the other leads, delete `O:\Development\Infra\tools\t3-queue.mjs`.
