@@ -76,3 +76,22 @@ test("a queued run with no message is still listed, with empty text", () => {
 test("no runs: empty list", () => {
   assert.deepEqual(queuedMessagesFromV2(v2Detail()), []);
 });
+
+test("a message linked only by userMessageId (no runId) is found", () => {
+  const d = v2Detail({
+    runs: [v2Run({ id: "r1", status: "queued", userMessageId: "mx" })],
+    messages: [v2Message({ id: "mx", runId: null, text: "linked by id" })],
+  });
+  assert.equal(queuedMessagesFromV2(d)[0].text, "linked by id");
+});
+
+test("queuedAt is when the run was queued, else when its message was written", () => {
+  const d = v2Detail({
+    runs: [
+      v2Run({ id: "r1", ordinal: 1, status: "queued", userMessageId: "m1", requestedAt: iso(9 * MIN) }),
+      v2Run({ id: "r2", ordinal: 2, status: "queued", userMessageId: "m2", requestedAt: null }),
+    ],
+    messages: [v2Message({ id: "m1", text: "a", createdAt: iso(8 * MIN) }), v2Message({ id: "m2", text: "b", createdAt: iso(7 * MIN) })],
+  });
+  assert.deepEqual(queuedMessagesFromV2(d).map((m) => m.queuedAt), [iso(9 * MIN), iso(7 * MIN)]);
+});

@@ -37,13 +37,13 @@ function shown(text: string, max = TEXT_CHARS): { text: string; truncated: boole
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/**
+ * A queue only stands behind an active run. The shell derives the session from the run status
+ * (v2.ts sessionFromShell): any active run, a queued one included, gives running or starting.
+ */
+const ACTIVE_SESSION = ["running", "starting"];
 function hasActiveRun(t: ThreadShell): boolean {
-  return (
-    t.latestTurn?.state === "running" ||
-    t.session?.status === "running" ||
-    t.session?.status === "starting" ||
-    Boolean(t.session?.activeTurnId)
-  );
+  return ACTIVE_SESSION.includes(t.session?.status ?? "");
 }
 
 /** The queued entry for runId, or an error that names the run's state and the fix. */
@@ -126,9 +126,7 @@ export function registerQueue(server: McpServer, getClient: () => T3Client, getD
           }
           const queue = queuedMessagesFromV2(detail);
           const t = detail.projection.thread;
-          if (queue.length > 0 || args.threadId) {
-            groups.push({ title: t.title ?? "(untitled)", project: projects.get(t.projectId) ?? t.projectId, threadId: t.id, queue });
-          }
+          groups.push({ title: t.title ?? "(untitled)", project: projects.get(t.projectId) ?? t.projectId, threadId: t.id, queue });
         }
 
         // Threads whose queue waits longest first; send order inside a thread.

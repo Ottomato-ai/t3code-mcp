@@ -10,7 +10,7 @@ import { LaunchDesk } from "../dist/desk/desk.js";
 import { DeskStore } from "../dist/desk/store.js";
 import { T3Error } from "../dist/client.js";
 import { fakeClient, parse, tempDir, T0 } from "./helpers.mjs";
-import { v2Detail, v2QueueDetail, LONG_TEXT } from "./v2-fixtures.mjs";
+import { v2Detail, v2QueueDetail, v2Run, v2Message, LONG_TEXT, iso, MIN } from "./v2-fixtures.mjs";
 
 async function setup(t, opts = {}) {
   const t3 = fakeClient(opts);
@@ -80,7 +80,13 @@ test("list respects limit but counts every queued message", async (t) => {
   const r = await call("list_queued_messages", { threadId: "t-q", limit: 1 });
   assert.equal(r.count, 3);
   assert.equal(r.messages.length, 1);
+  assert.equal(r.shown, 1);
   assert.equal(r.messages[0].position, 1);
+  const all = await call("list_queued_messages", { threadId: "t-q" });
+  assert.equal(all.shown, undefined, "shown only when rows were cut");
+  const exact = await call("list_queued_messages", { threadId: "t-q", limit: 3 });
+  assert.equal(exact.messages.length, 3);
+  assert.equal(exact.shown, undefined, "limit equal to count cuts nothing");
 });
 
 test("list with threadId and an empty queue says so", async (t) => {
@@ -112,6 +118,46 @@ test("list without threadId stops at 25 threads and says it was capped", async (
   assert.equal(r.threadsChecked, 25);
   assert.equal(r.capped, true);
   assert.match(r.note, /25 of 30/);
+});
+
+test("list without threadId at exactly 25 threads is not capped", async (t) => {
+  const ids = Array.from({ length: 25 }, (_, i) => `t-${i}`);
+  const { call } = await setup(t, { running: ids, details: Object.fromEntries(ids.map((id) => [id, v2Detail()])) });
+  const r = await call("list_queued_messages", {});
+  assert.equal(r.threadsChecked, 25);
+  assert.equal(r.capped, undefined);
+  assert.doesNotMatch(r.note, /Capped/);
+});
+
+test("list without threadId reads starting threads, skips ready and archived ones", async (t) => {
+  const { t3, call } = await setup(t, {
+    running: ["t-start", "t-ready", "t-arch", "t-run"],
+    shellStatuses: { "t-start": "starting", "t-ready": "ready" },
+    archived: ["t-arch"],
+    details: { "t-start": v2Detail(), "t-ready": v2Detail(), "t-arch": v2Detail(), "t-run": v2Detail() },
+  });
+  await call("list_queued_messages", {});
+  assert.deepEqual([...t3.state.queueReads].sort(), ["t-run", "t-start"]);
+});
+
+test("list without threadId puts the thread whose queue waits longest first", async (t) => {
+  const old = v2Detail({
+    thread: { id: "t-old", title: "old queue" },
+    runs: [v2Run({ id: "run-o", status: "queued", userMessageId: "m-o", requestedAt: iso(300 * MIN) })],
+    messages: [v2Message({ id: "m-o", runId: "run-o", text: "stale" })],
+  });
+  const { call } = await setup(t, { running: ["t-q", "t-old"], details: { "t-q": v2QueueDetail(), "t-old": old } });
+  const r = await call("list_queued_messages", {});
+  assert.deepEqual(r.messages.map((m) => m.runId), ["run-o", "run-q8", "run-q6", "run-q7"]);
+  assert.match(r.spoken, /4 queued messages on 2 threads; the oldest was queued .* on old queue/);
+});
+
+test("when capped, the most recently updated threads are read first", async (t) => {
+  const ids = Array.from({ length: 26 }, (_, i) => `t-${i}`);
+  const updatedAt = { "t-25": new Date(T0 + 60 * MIN).toISOString() };
+  const { t3, call } = await setup(t, { running: ids, updatedAt, details: Object.fromEntries(ids.map((id) => [id, v2Detail()])) });
+  await call("list_queued_messages", {});
+  assert.equal(t3.state.queueReads[0], "t-25");
 });
 
 test("list without threadId reports a thread that could not be read and keeps going", async (t) => {
@@ -148,6 +194,29 @@ test("cancel removes a queued message, re-reads the queue and logs it", async (t
   assert.equal(ev[0].lane, "Lane A");
   assert.equal(ev[0].preview, "RESUME now");
   assert.equal(typeof ev[0].at, "string");
+});
+
+test("cancel writes a 120-character preview of a long message to the log", async (t) => {
+  const { events, call } = await setup(t, busy());
+  const r = await call("cancel_queued_message", { threadId: "t-q", runId: "run-q7", lane: "Lane A" });
+  assert.equal(r.truncated, true);
+  assert.equal(events().find((e) => e.type === "queue_cancel").preview, `${LONG_TEXT.slice(0, 120)}…`);
+});
+
+test("cancel warns when T3 still shows the run queued afterwards", async (t) => {
+  const { call } = await setup(t, { ...busy(), applyQueue: false });
+  const r = await call("cancel_queued_message", { threadId: "t-q", runId: "run-q6", lane: "Lane A" });
+  assert.equal(r.cancelled, true);
+  assert.equal(r.runStatus, "queued");
+  assert.match(r.warning, /still shows the run queued/);
+});
+
+test("cancel that cannot re-read the queue says it was cancelled and not to cancel again", async (t) => {
+  const { call } = await setup(t, { ...busy(), failReadFrom: 2 });
+  const r = await call("cancel_queued_message", { threadId: "t-q", runId: "run-q6", lane: "Lane A" });
+  assert.equal(r.cancelled, true);
+  assert.equal(r.remaining, undefined);
+  assert.match(r.warning, /Do not cancel again/);
 });
 
 test("cancel of a running run sends nothing and points to interrupt_thread", async (t) => {
@@ -257,4 +326,63 @@ test("edit that never reached T3 says it was not sent", async (t) => {
   assert.equal(r.isError, true);
   assert.match(r.text, /not sent/i);
   assert.match(r.text, /unchanged/i);
+});
+
+test("edit logs a failed edit with whether it was sent", async (t) => {
+  const err = new T3Error("T3 RPC orchestration.dispatchCommand failed: Automatic completion deliveries cannot be edited.");
+  const { call, events } = await setup(t, { ...busy(), dispatchError: err });
+  const r = await call("edit_queued_message", { threadId: "t-q", runId: "run-q6", message: "x", lane: "Lane A" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /cannot be edited/);
+  const ev = events().filter((e) => e.type === "queue_edit_failed");
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].sent, true);
+  assert.equal(ev[0].new_preview, "x");
+});
+
+test("edit warns and shows T3's text when T3 holds different text afterwards", async (t) => {
+  const { call } = await setup(t, { ...busy(), applyQueue: false });
+  const r = await call("edit_queued_message", { threadId: "t-q", runId: "run-q6", message: "changed", lane: "Lane A" });
+  assert.equal(r.edited, true);
+  assert.equal(inner(r.new), "RESUME now");
+  assert.match(r.warning, /different text/);
+});
+
+test("edit warns when the run is no longer queued afterwards", async (t) => {
+  const { t3, call } = await setup(t, busy());
+  const orig = t3.dispatch;
+  t3.dispatch = async (cmd) => {
+    const out = await orig(cmd);
+    t3.state.details["t-q"].projection.runs.find((r) => r.id === "run-q6").status = "running";
+    return out;
+  };
+  const r = await call("edit_queued_message", { threadId: "t-q", runId: "run-q6", message: "late", lane: "Lane A" });
+  assert.equal(r.edited, true);
+  assert.match(r.warning, /no longer queued/);
+});
+
+test("edit that cannot re-read the queue still reports the edit with a warning", async (t) => {
+  const { call } = await setup(t, { ...busy(), failReadFrom: 2 });
+  const r = await call("edit_queued_message", { threadId: "t-q", runId: "run-q6", message: "new", lane: "Lane A" });
+  assert.equal(r.edited, true);
+  assert.equal(inner(r.new), "new");
+  assert.match(r.warning, /could not be read again/);
+});
+
+test("edit of a completed run says there is nothing to do and suggests send_message", async (t) => {
+  const d = v2QueueDetail();
+  d.projection.runs.find((r) => r.id === "run-4").status = "completed";
+  const { call } = await setup(t, { running: ["t-q"], details: { "t-q": d } });
+  const r = await call("edit_queued_message", { threadId: "t-q", runId: "run-4", message: "x", lane: "Lane A" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /run-4 is completed, not queued\. Nothing to do; send a new message with send_message/);
+});
+
+test("a text of exactly 300 characters is not truncated", async (t) => {
+  const d = v2QueueDetail();
+  d.projection.messages.find((m) => m.id === "m-q8").text = "y".repeat(300);
+  const { call } = await setup(t, { running: ["t-q"], details: { "t-q": d } });
+  const r = await call("list_queued_messages", { threadId: "t-q" });
+  assert.equal(r.messages[0].truncated, undefined);
+  assert.equal(inner(r.messages[0].text), "y".repeat(300));
 });
