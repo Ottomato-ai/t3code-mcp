@@ -2,6 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { T3Error } from "../dist/client.js";
 
 export const T0 = Date.parse("2026-10-12T00:00:00Z");
 export const MIN = 60_000;
@@ -41,6 +42,12 @@ export function fakeClient(opts = {}) {
     /** Provider session ids per thread id (thread() detail), for stop_thread. */
     sessionIds: opts.sessionIds ?? {},
     dispatchDelayMs: opts.dispatchDelayMs ?? 0,
+    /** V2 thread details per thread id for queuedMessages(); a missing id is an unknown thread. */
+    details: opts.details ?? {},
+    /** Thread ids passed to queuedMessages(), in call order. */
+    queueReads: [],
+    /** Error dispatch() throws instead of applying the command. */
+    dispatchError: opts.dispatchError ?? null,
     project: {
       id: "p1",
       title: "Scratch",
@@ -94,9 +101,24 @@ export function fakeClient(opts = {}) {
         },
       };
     },
+    async queuedMessages(id) {
+      state.queueReads.push(id);
+      const d = state.details[id];
+      if (!d) throw new T3Error(`No thread ${id} in T3. Find the id with list_threads or list_queued_messages.`, { status: 404 });
+      return structuredClone(d);
+    },
     async dispatch(cmd) {
       if (state.dispatchDelayMs) await new Promise((r) => setTimeout(r, state.dispatchDelayMs));
+      if (state.dispatchError) throw state.dispatchError;
       state.dispatched.push(cmd);
+      // Queue commands change the stored detail the way the server does.
+      const d = state.details[cmd.threadId];
+      const run = d?.projection.runs.find((r) => r.id === cmd.runId);
+      if (cmd.type === "queued-run.cancel" && run) run.status = "cancelled";
+      if (cmd.type === "queued-run.edit" && run) {
+        const m = d.projection.messages.find((x) => x.id === run.userMessageId);
+        if (m) m.text = cmd.text;
+      }
       return { sequence: ++seq };
     },
   };

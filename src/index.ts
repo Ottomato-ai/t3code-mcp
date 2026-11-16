@@ -7,6 +7,7 @@ import { registerPhase1 } from "./tools/phase1.js";
 import { registerPhase2 } from "./tools/phase2.js";
 import { registerPhase3 } from "./tools/phase3.js";
 import { registerLaunchDesk } from "./tools/desk.js";
+import { registerQueue } from "./tools/queue.js";
 import { LaunchDesk } from "./desk/desk.js";
 import { startHttp } from "./http.js";
 
@@ -25,6 +26,7 @@ export function createServer(): McpServer {
   registerPhase2(server, getClient, getDesk);
   registerPhase3(server, getClient);
   registerLaunchDesk(server, getClient, getDesk);
+  registerQueue(server, getClient, getDesk);
   return server;
 }
 
