@@ -57,3 +57,40 @@ Out of scope: send now, steer, reorder, attachments, any UI, any change to `send
 ## After merge (lead)
 
 Pull and build in the primary checkout, check one harness sees the three tools, replace the helper call in `~/.claude/CLAUDE.md` with the tool names, tell the other leads, delete `O:\Development\Infra\tools\t3-queue.mjs`.
+
+## Design record
+
+Designed by: builder lane "(Build) t3code-mcp: list, cancel, edit queued messages" (T3 thread c891c48b), account Claude 2 (`claudeAgent_claude_2`), model Claude Opus 5.5 (`claude-opus-5-5`), 2026-11-16.
+
+Reference products studied:
+
+1. T3 Code itself (`C:\Users\Ned\AppData\Local\Programs\t3code\resources\server.asar`, build of 2026-11-11):
+   - Web client `EnvironmentCommands.cancelQueuedRun` / `editQueuedRun`: the command shapes used here.
+   - Contract `OrchestrationV2Command`: `queued-run.cancel {commandId, threadId, runId}`; `queued-run.edit {context?, commandId, threadId, runId, text, attachments?}`.
+   - Orchestrator `dispatchQueuedRunCancel` / `dispatchQueuedRunEdit`: refuses a run that is not `queued` ("Run X is not queued."), a blank edit, edits of automatic completion deliveries, and edits of guest messages.
+   - `queuedRunsInDeliveryOrder`: automatic completion deliveries first, then `queuePosition ?? ordinal`.
+   - T3's built-in MCP tool `t3_queue` (actions list, read, edit, cancel, reorder, promote_to_steer): list in send order, entries `{queuedRunId, text, truncated}` (1,000 code points in list, 16,000 in read), `text` max 100,000.
+2. Claude Code queued prompts: Enter while Claude works queues the message, and the queue is shown in the conversation until it is sent. "Press up to edit queued messages" pulls the queue back into the prompt to edit or delete it; there is no per-item view, delete or reorder (feature requests anthropics/claude-code#77537 and #62877; a bug about lost input mode on edit, claudeissues 86816).
+3. Codex CLI: Enter steers the running turn, and queued drafts drain after the turn ends. Editing a queued message by up arrow was reported broken ("queued follow-up no longer exists", OpenAI community forum). I found no official per-item delete.
+
+What we took:
+- T3's own send order (not `requestedAt`; a reordered queue would otherwise show the wrong "next").
+- The `userMessageId` link from T3's `queueEntry`.
+- Code-point truncation with a `truncated` flag.
+- The 100,000-character edit limit.
+- From Claude Code: edit means replacing the whole text.
+
+What we left:
+- T3's single multi-action tool. Three tools with one verb each fit the voice-first surface (SPEC principle 1) and make the read-only tool safe to call freely.
+- Reorder, steer and send now: out of scope by plan.
+- Claude Code's pop-the-whole-queue editing. Per-item ids instead, so an agent cannot touch messages it did not name.
+
+Why this design:
+- Cross-thread view. Neither reference product lists queues across threads, and that is exactly what the 15-minute checkup needs. It reads one thread at a time, capped at 25, and says when it is capped.
+- Check, then act, then re-read. The tool checks state before the command (with a fix named in the error, SPEC principle 4) and re-reads after it. The answer is what T3 now holds, not what we sent, and a mismatch is a warning, never a silent success.
+- Audit trail, since T3 has no ownership check: every cancel and edit, and every failed one, goes to the desk `events.jsonl` with the lane.
+- Text is wrapped as `<untrusted-data>`, because queued text is written by other agents.
+
+Deviations from this plan, found in the server code (proof above):
+- The plan's step 3 orders by `requestedAt`; the server orders by `queuePosition ?? ordinal`. Live check on thread 0f5820f3: every run carries `queuePosition`.
+- The text is found by `run.userMessageId` first and `runId` + role `user` second. Both matched in the live probe.
