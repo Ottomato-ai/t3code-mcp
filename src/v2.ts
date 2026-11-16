@@ -71,6 +71,10 @@ export interface V2ShellSnapshot {
 interface V2Run {
   id: string;
   status: string;
+  ordinal?: number;
+  /** Send order of a queued run (1 = next); null when never reordered. */
+  queuePosition?: number | null;
+  userMessageId?: string | null;
   requestedAt?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
@@ -96,6 +100,10 @@ interface V2Message {
   runId?: string | null;
   role: Message["role"];
   text: string;
+  createdBy?: string;
+  creationSource?: string;
+  /** Set on automatic completion deliveries (delegated task results). */
+  delegatedCompletion?: unknown;
   attachments?: unknown[];
   streaming?: boolean;
   createdAt: string;
@@ -407,6 +415,53 @@ export function detailFromV2(raw: V2ThreadDetailSnapshot, opts: DetailOptions): 
   };
 }
 
+// ---------- queued messages ----------
+
+export interface QueuedMessage {
+  /** 1 = sent next. */
+  position: number;
+  runId: string;
+  messageId: string | null;
+  text: string;
+  createdBy: string | null;
+  creationSource: string | null;
+  /** When the run was queued (run.requestedAt), else when its message was written. */
+  queuedAt: string | null;
+  /** An automatic completion delivery: the server sends these first and refuses to edit them. */
+  automatic: boolean;
+}
+
+/**
+ * The queued messages of a thread in the order the server sends them (queuedRunsInDeliveryOrder
+ * in the T3 server): automatic completion deliveries first, then queuePosition, else ordinal.
+ * The text is the user message the run points to (run.userMessageId), as the server reads it.
+ */
+export function queuedMessagesFromV2(raw: V2ThreadDetailSnapshot): QueuedMessage[] {
+  const p = raw.projection;
+  const messages = p.messages ?? [];
+  const messageOf = (r: V2Run) =>
+    (r.userMessageId ? messages.find((m) => m.id === r.userMessageId) : undefined) ??
+    messages.find((m) => m.runId === r.id && m.role === "user");
+  const order = (r: V2Run) => r.queuePosition ?? r.ordinal ?? 0;
+  return (p.runs ?? [])
+    .filter((r) => r.status === "queued")
+    .map((r) => {
+      const m = messageOf(r);
+      return { r, m, automatic: m?.delegatedCompletion !== undefined };
+    })
+    .sort((a, b) => Number(b.automatic) - Number(a.automatic) || order(a.r) - order(b.r))
+    .map(({ r, m, automatic }, i) => ({
+      position: i + 1,
+      runId: r.id,
+      messageId: m?.id ?? null,
+      text: m?.text ?? "",
+      createdBy: m?.createdBy ?? null,
+      creationSource: m?.creationSource ?? null,
+      queuedAt: r.requestedAt ?? m?.createdAt ?? null,
+      automatic,
+    }));
+}
+
 // ---------- commands ----------
 
 /** Who and what created a command: an MCP client acting for the user. */
@@ -477,6 +532,15 @@ export const commands = {
     commandId: newId(),
     threadId,
     interactionMode,
+  }),
+  queuedRunCancel: (threadId: string, runId: string) => ({ type: "queued-run.cancel", commandId: newId(), threadId, runId }),
+  /** Text only: attachments and context stay as they are on the server. */
+  queuedRunEdit: (threadId: string, runId: string, text: string) => ({
+    type: "queued-run.edit",
+    commandId: newId(),
+    threadId,
+    runId,
+    text,
   }),
   archive: (threadId: string) => ({ type: "thread.archive", commandId: newId(), threadId }),
   unarchive: (threadId: string) => ({ type: "thread.unarchive", commandId: newId(), threadId }),
