@@ -51,6 +51,7 @@ Env:
   T3_ORIGIN       override T3 server origin (default: ~/.t3/userdata/server-runtime.json)
   MCP_HTTP_TOKEN  bearer token clients must present in --http mode
   T3_LAUNCH_CAP   max live T3 threads across all lanes (default 15)
+  T3_LAUNCH_MEMORY_BLOCK_PERCENT  no new launch at or above this Host Guard commit % (50-95, default 85)
   T3_LAUNCH_GRANT_MINUTES  minutes a granted launch slot is held (default 10)
   T3_LAUNCH_DESK_DIR       launch queue folder (default %LOCALAPPDATA%/OttoSystems/launch-desk)`,
     );

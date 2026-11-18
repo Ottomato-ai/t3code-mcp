@@ -3,7 +3,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ShellSnapshot } from "../model.js";
-import { readHostGuardMemory, type MemoryReading } from "./memory.js";
+import { defaultHostGuardFile, readHostGuardMemory, type MemoryReading } from "./memory.js";
 import { runningThreadIds } from "./running.js";
 import { untrusted } from "./untrusted.js";
 import { decideCap, defaultHeadroomFile, readHeadroom, type CapDecision, type HeadroomReading } from "./headroom.js";
@@ -30,6 +30,10 @@ import {
 /** The OttoContext lead's lane after its status tag, e.g. "(Resume) ** OttoContext". */
 export const LEAD_LANE_NAME = "** OttoContext";
 export const DEFAULT_CAP = 15;
+/** No new grant at or above this Host Guard commit percent (T3_LAUNCH_MEMORY_BLOCK_PERCENT). */
+export const DEFAULT_MEMORY_BLOCK_PERCENT = 85;
+export const MIN_MEMORY_BLOCK_PERCENT = 50;
+export const MAX_MEMORY_BLOCK_PERCENT = 95;
 export const TICK_MS = 30_000;
 /** launch_wait and the tick fetch the T3 shell at most this often per process. */
 export const SHELL_INTERVAL_MS = 30_000;
@@ -55,6 +59,8 @@ export interface LaunchDeskOptions {
   shellIntervalMs?: number;
   /** Exact lead lane (T3_LAUNCH_LEAD_LANE); default: match "** OttoContext" after the status tag. */
   leadLane?: string;
+  /** No grant at or above this Host Guard commit percent (default 85). */
+  memoryBlockPercent?: number;
   /** Phase 2: Host Guard headroom (extra slots). Without it the cap is `cap` (reason config). */
   readHeadroom?: () => HeadroomReading;
   /** The headroom file read by readHeadroom (shown for diagnostics). */
@@ -86,6 +92,22 @@ function envInt(value: string | undefined, fallback: number): number {
   return value !== undefined && value !== "" && Number.isInteger(n) && n >= 0 ? n : fallback;
 }
 
+/**
+ * T3_LAUNCH_MEMORY_BLOCK_PERCENT: an integer from 50 to 95. Unset or empty gives the default
+ * silently; any other bad value gives the default and one log line that names it.
+ */
+export function envMemoryBlockPercent(value: string | undefined, log: (line: string) => void): number {
+  if (value === undefined || value === "") return DEFAULT_MEMORY_BLOCK_PERCENT;
+  const n = /^\d{1,3}$/.test(value) ? Number(value) : NaN;
+  if (n >= MIN_MEMORY_BLOCK_PERCENT && n <= MAX_MEMORY_BLOCK_PERCENT) return n;
+  const shown = JSON.stringify(value.length > 40 ? `${value.slice(0, 40)}...` : value);
+  log(
+    `launch-desk: T3_LAUNCH_MEMORY_BLOCK_PERCENT=${shown} is not an integer from ${MIN_MEMORY_BLOCK_PERCENT} ` +
+      `to ${MAX_MEMORY_BLOCK_PERCENT}; using ${DEFAULT_MEMORY_BLOCK_PERCENT}.`,
+  );
+  return DEFAULT_MEMORY_BLOCK_PERCENT;
+}
+
 export function defaultDeskDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.T3_LAUNCH_DESK_DIR) return env.T3_LAUNCH_DESK_DIR;
   const local = env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
@@ -99,6 +121,7 @@ export class LaunchDesk {
   readonly pollMs: number;
   readonly shellIntervalMs: number;
   readonly leadLane: string | undefined;
+  readonly memoryBlockPercent: number;
   readonly headroomFile: string | undefined;
   private readonly readHeadroom: (() => HeadroomReading) | undefined;
   private readonly readMemory: () => MemoryReading;
@@ -112,7 +135,8 @@ export class LaunchDesk {
     this.store = opts.store;
     this.cap = opts.cap;
     this.grantWindowMs = opts.grantWindowMs ?? GRANT_WINDOW_MS;
-    this.readMemory = opts.readMemory ?? (() => readHostGuardMemory());
+    this.memoryBlockPercent = opts.memoryBlockPercent ?? DEFAULT_MEMORY_BLOCK_PERCENT;
+    this.readMemory = opts.readMemory ?? (() => readHostGuardMemory({ blockPercent: this.memoryBlockPercent }));
     this.now = opts.now ?? Date.now;
     this.pollMs = opts.pollMs ?? 3_000;
     this.shellIntervalMs = opts.shellIntervalMs ?? SHELL_INTERVAL_MS;
@@ -121,10 +145,17 @@ export class LaunchDesk {
     this.headroomFile = opts.headroomFile;
   }
 
-  /** T3_LAUNCH_CAP (15), T3_LAUNCH_GRANT_MINUTES (10), T3_LAUNCH_DESK_DIR, T3_LAUNCH_LEAD_LANE. */
-  static fromEnv(env: NodeJS.ProcessEnv = process.env): LaunchDesk {
+  /**
+   * T3_LAUNCH_CAP (15), T3_LAUNCH_MEMORY_BLOCK_PERCENT (85), T3_LAUNCH_GRANT_MINUTES (10),
+   * T3_LAUNCH_DESK_DIR, T3_LAUNCH_LEAD_LANE. Host Guard files from HOST_GUARD_HOME.
+   */
+  static fromEnv(env: NodeJS.ProcessEnv = process.env, log: (line: string) => void = console.error): LaunchDesk {
     const headroomFile = defaultHeadroomFile(env);
+    const heartbeatFile = defaultHostGuardFile(env);
+    const memoryBlockPercent = envMemoryBlockPercent(env.T3_LAUNCH_MEMORY_BLOCK_PERCENT, log);
     return new LaunchDesk({
+      memoryBlockPercent,
+      readMemory: () => readHostGuardMemory({ file: heartbeatFile, blockPercent: memoryBlockPercent }),
       headroomFile,
       readHeadroom: () => readHeadroom({ file: headroomFile }),
       store: new DeskStore(defaultDeskDir(env)),
@@ -134,9 +165,12 @@ export class LaunchDesk {
     });
   }
 
-  /** Read host-guard; log once each time it turns unreadable or stale (it never blocks then). */
+  /**
+   * Read host-guard; log once each time it turns unreadable or stale (it never blocks then).
+   * blockPercent is the desk's own, the line the grant decision uses.
+   */
   memory(): MemoryReading {
-    const m = this.readMemory();
+    const m = { ...this.readMemory(), blockPercent: this.memoryBlockPercent };
     if (m.status !== "ok" && this.lastMemoryStatus === "ok") {
       this.store.logEvent({ type: "memory_unreadable", status: m.status, detail: m.detail });
       console.error(`launch-desk: host-guard status ${m.status} (${m.detail}); not blocking launches.`);
@@ -150,6 +184,7 @@ export class LaunchDesk {
       runningThreadIds: runningIds,
       cap: this.cap,
       commitPercent: memory.blocks ? memory.commitPercent : null,
+      memoryBlockPercent: this.memoryBlockPercent,
       nowMs: this.now(),
       grantWindowMs: this.grantWindowMs,
     };
@@ -362,7 +397,13 @@ export class LaunchDesk {
     const memory = this.memory();
     const reading = this.readHeadroom?.() ?? null;
     const decision = this.capDecision(state, reading);
-    const used = slotsUsed(state, { runningThreadIds: runningIds, cap: decision.effective, commitPercent: null, nowMs });
+    const used = slotsUsed(state, {
+      runningThreadIds: runningIds,
+      cap: decision.effective,
+      commitPercent: null,
+      memoryBlockPercent: this.memoryBlockPercent,
+      nowMs,
+    });
     return {
       running: runningIds.length,
       cap: decision.effective,

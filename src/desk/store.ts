@@ -74,6 +74,8 @@ export interface SlotContext {
   cap: number;
   /** Host commit percent; null when host-guard status is unreadable (does not block). */
   commitPercent: number | null;
+  /** No grant at or above this commit percent (the desk's T3_LAUNCH_MEMORY_BLOCK_PERCENT). */
+  memoryBlockPercent: number;
   nowMs: number;
   grantWindowMs?: number;
   /** Phase 2: grants at or above this many used slots are extra. */
@@ -85,7 +87,6 @@ export interface SlotContext {
 export const GRANT_WINDOW_MS = 10 * 60_000;
 export const WAITING_TTL_MS = 24 * 60 * 60_000;
 export const HISTORY_LIMIT = 200;
-export const MEMORY_BLOCK_PERCENT = 90;
 /** A launch (or failed attempt) holds its slot this long even before T3 shows its session. */
 export const RECENT_LAUNCH_MS = 2 * 60_000;
 /** A launch in progress longer than this is failed: the process that claimed it died. */
@@ -171,8 +172,8 @@ export function slotsUsed(state: DeskState, ctx: SlotContext): number {
   return used;
 }
 
-export function memoryAllowsGrant(commitPercent: number | null): boolean {
-  return commitPercent === null || commitPercent < MEMORY_BLOCK_PERCENT;
+export function memoryAllowsGrant(commitPercent: number | null, blockPercent: number): boolean {
+  return commitPercent === null || commitPercent < blockPercent;
 }
 
 /** Expire grants past their window, waiting entries older than 24 h; fail launches stuck over 5 min. */
@@ -198,7 +199,7 @@ export function expireEntries(state: DeskState, nowMs: number): DeskEntry[] {
 /** Grant the first waiting entries while a slot is free and memory allows. */
 export function grantNext(state: DeskState, ctx: SlotContext): DeskEntry[] {
   const granted: DeskEntry[] = [];
-  if (!memoryAllowsGrant(ctx.commitPercent)) return granted;
+  if (!memoryAllowsGrant(ctx.commitPercent, ctx.memoryBlockPercent)) return granted;
   let used = slotsUsed(state, ctx);
   let extraGiven = 0;
   for (const e of orderedWaiting(state)) {

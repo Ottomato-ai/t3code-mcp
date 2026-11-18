@@ -10,7 +10,7 @@ import { T0, MIN, HOUR, tempDir, ownerOnlyAcl, inheritedAcl } from "./helpers.mj
 
 /** pid of a process that has already exited. */
 const DEAD = spawnSync(process.execPath, ["-e", ""]).pid;
-const ctx = (o = {}) => ({ runningThreadIds: [], cap: 2, commitPercent: 50, nowMs: T0, ...o });
+const ctx = (o = {}) => ({ runningThreadIds: [], cap: 2, commitPercent: 50, memoryBlockPercent: 85, nowMs: T0, ...o });
 const add = (st, lane, priority = "normal", at = T0) =>
   S.enqueue(st, { lane, project: "Scratch", project_id: "p1", task: `task ${lane}`, priority, nowMs: at });
 const events = (dir) =>
@@ -101,12 +101,23 @@ test("no grant at the cap exactly", () => {
   assert.equal(S.recompute(st, ctx({ cap: 2, runningThreadIds: ["t1", "t2"] })).granted.length, 0);
 });
 
-test("memory guard: no grant at or above 90% commit; unknown commit does not block", () => {
-  for (const [commitPercent, expected] of [[90, 0], [97.5, 0], [89.9, 1], [null, 1]]) {
+test("memory guard: no grant at or above the block percent (85), also under the cap; unknown commit does not block", () => {
+  for (const [commitPercent, expected] of [[85, 0], [97.5, 0], [84.9, 1], [null, 1]]) {
     const st = S.emptyState();
     add(st, "A");
     assert.equal(S.recompute(st, ctx({ commitPercent })).granted.length, expected, `commit ${commitPercent}`);
   }
+});
+
+test("memory guard: block percent 90 restores the old line", () => {
+  for (const [commitPercent, expected] of [[90, 0], [89.9, 1], [87, 1]]) {
+    const st = S.emptyState();
+    add(st, "A");
+    assert.equal(S.recompute(st, ctx({ commitPercent, memoryBlockPercent: 90 })).granted.length, expected, `commit ${commitPercent}`);
+  }
+  assert.equal(S.memoryAllowsGrant(84.9, 85), true);
+  assert.equal(S.memoryAllowsGrant(85, 85), false);
+  assert.equal(S.memoryAllowsGrant(null, 50), true);
 });
 
 test("a grant expires after 10 minutes and the next entry is granted", () => {

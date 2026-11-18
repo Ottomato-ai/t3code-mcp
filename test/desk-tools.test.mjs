@@ -31,6 +31,7 @@ async function setup(t, opts = {}) {
     pollMs: 20,
     shellIntervalMs: opts.shellIntervalMs ?? 0,
     leadLane: opts.leadLane,
+    memoryBlockPercent: opts.memoryBlockPercent,
     readHeadroom: opts.headroom ? () => opts.headroom : undefined,
   });
   const server = new McpServer({ name: "test", version: "0" });
@@ -101,7 +102,43 @@ test("queued under memory pressure even with a free slot", async (t) => {
   const r = await call("create_thread", create("Lane A"));
   assert.equal(r.queued, true);
   assert.equal(r.memory.commitPercent, 93);
+  assert.equal(r.memory.blockPercent, 85);
   assert.equal(t3.state.dispatched.length, 0);
+});
+
+test("memory line 85 (default): commit 85 is queued under a free cap, the answer keeps its note and states the percent", async (t) => {
+  const { call, t3 } = await setup(t, { cap: 5, memory: { commitPercent: 85, blocks: true } });
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.queued, true);
+  assert.deepEqual(r.memory, { status: "ok", commitPercent: 85, blockPercent: 85 });
+  assert.match(r.note, /^Not launched: the launch cap is reached, host memory is high, or lanes wait ahead\. Do not retry in a loop\./);
+  assert.match(r.note, /Host memory: commit 85% is at or above the 85% launch line\./);
+  assert.equal(t3.state.dispatched.length, 0);
+  const q = await call("launch_queue", {});
+  assert.deepEqual(q.memory, { status: "ok", commitPercent: 85, blockPercent: 85, blocks: true });
+});
+
+test("memory line 85 (default): commit 84.9 launches", async (t) => {
+  const { call } = await setup(t, { cap: 5, memory: { commitPercent: 84.9, blocks: false } });
+  assert.equal((await call("create_thread", create("Lane A"))).created, true);
+});
+
+test("memory line 90 (setting): commit 87 launches, commit 90 is queued", async (t) => {
+  const ok = await setup(t, { cap: 5, memoryBlockPercent: 90, memory: { commitPercent: 87, blocks: false } });
+  assert.equal((await ok.call("create_thread", create("Lane A"))).created, true);
+  const high = await setup(t, { cap: 5, memoryBlockPercent: 90, memory: { commitPercent: 90, blocks: true } });
+  const r = await high.call("create_thread", create("Lane A"));
+  assert.equal(r.queued, true);
+  assert.equal(r.memory.blockPercent, 90);
+  assert.match(r.note, /commit 90% is at or above the 90% launch line/);
+});
+
+test("a queued answer without memory pressure does not name a memory line", async (t) => {
+  const { call } = await setup(t, { cap: 1, running: ["x"] });
+  const r = await call("create_thread", create("Lane A"));
+  assert.equal(r.queued, true);
+  assert.equal(r.memory.blockPercent, 85);
+  assert.doesNotMatch(r.note, /launch line/);
 });
 
 test("queued when someone waits ahead, even if a slot just came free; the grant goes to the first", async (t) => {
@@ -684,6 +721,66 @@ test("fromEnv: T3_LAUNCH_CAP, T3_LAUNCH_GRANT_MINUTES and T3_LAUNCH_DESK_DIR", (
     assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_CAP: bad, LOCALAPPDATA: "C:\\L" }).cap, 15, `cap ${JSON.stringify(bad)}`);
   }
   assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_CAP: "0", LOCALAPPDATA: "C:\\L" }).cap, 0);
+});
+
+const L = "C:\\L";
+
+test("fromEnv: T3_LAUNCH_MEMORY_BLOCK_PERCENT defaults to 85 and 90 restores the old line", () => {
+  const logs = [];
+  const log = (line) => logs.push(line);
+  assert.equal(LaunchDesk.fromEnv({ LOCALAPPDATA: L }, log).memoryBlockPercent, 85);
+  assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_MEMORY_BLOCK_PERCENT: "", LOCALAPPDATA: L }, log).memoryBlockPercent, 85);
+  assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_MEMORY_BLOCK_PERCENT: "90", LOCALAPPDATA: L }, log).memoryBlockPercent, 90);
+  assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_MEMORY_BLOCK_PERCENT: "50", LOCALAPPDATA: L }, log).memoryBlockPercent, 50);
+  assert.equal(LaunchDesk.fromEnv({ T3_LAUNCH_MEMORY_BLOCK_PERCENT: "95", LOCALAPPDATA: L }, log).memoryBlockPercent, 95);
+  assert.deepEqual(logs, [], "a missing or valid value logs nothing");
+});
+
+test("fromEnv: T3_LAUNCH_MEMORY_BLOCK_PERCENT 49, 96, abc and 85.5 fall back to 85 with one log line naming the value", () => {
+  for (const bad of ["49", "96", "abc", "85.5", "-85"]) {
+    const logs = [];
+    const d = LaunchDesk.fromEnv({ T3_LAUNCH_MEMORY_BLOCK_PERCENT: bad, LOCALAPPDATA: L }, (line) => logs.push(line));
+    assert.equal(d.memoryBlockPercent, 85, bad);
+    assert.equal(logs.length, 1, bad);
+    assert.ok(logs[0].includes("T3_LAUNCH_MEMORY_BLOCK_PERCENT"), logs[0]);
+    assert.ok(logs[0].includes(JSON.stringify(bad)), logs[0]);
+    assert.match(logs[0], /using 85/);
+  }
+});
+
+test("fromEnv: a long or multi-line bad value is logged on one line, cut short", () => {
+  const logs = [];
+  LaunchDesk.fromEnv({ T3_LAUNCH_MEMORY_BLOCK_PERCENT: "9\n" + "x".repeat(500), LOCALAPPDATA: L }, (line) => logs.push(line));
+  assert.equal(logs.length, 1);
+  assert.doesNotMatch(logs[0], /[\r\n]/);
+  assert.ok(logs[0].length < 200, String(logs[0].length));
+});
+
+test("fromEnv passes the percent to the real heartbeat reader: 87% blocks at 85, launches at 90", (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, "heartbeat.json"), JSON.stringify({ at: new Date().toISOString(), commitPercent: 87 }));
+  const req = { lane: "Lane A", projectId: "p1", project: "P", task: "t", ned: false };
+  const at85 = LaunchDesk.fromEnv({ HOST_GUARD_HOME: dir, T3_LAUNCH_DESK_DIR: join(dir, "desk85") }, () => {});
+  const m85 = at85.memory();
+  assert.deepEqual([m85.status, m85.commitPercent, m85.blockPercent, m85.blocks], ["ok", 87, 85, true]);
+  assert.equal(at85.admit(req, []).kind, "queued");
+  const at90 = LaunchDesk.fromEnv({ HOST_GUARD_HOME: dir, T3_LAUNCH_DESK_DIR: join(dir, "desk90"), T3_LAUNCH_MEMORY_BLOCK_PERCENT: "90" }, () => {});
+  const m90 = at90.memory();
+  assert.deepEqual([m90.blockPercent, m90.blocks], [90, false]);
+  assert.equal(at90.admit(req, []).kind, "launch");
+});
+
+test("fromEnv: a stale or unreadable heartbeat never blocks, even at 50", (t) => {
+  const dir = tempDir(t);
+  const req = { lane: "Lane A", projectId: "p1", project: "P", task: "t", ned: false };
+  const env = { HOST_GUARD_HOME: dir, T3_LAUNCH_MEMORY_BLOCK_PERCENT: "50" };
+  const none = LaunchDesk.fromEnv({ ...env, T3_LAUNCH_DESK_DIR: join(dir, "d1") }, () => {});
+  assert.equal(none.memory().status, "unreadable");
+  assert.equal(none.admit(req, []).kind, "launch");
+  writeFileSync(join(dir, "heartbeat.json"), JSON.stringify({ at: new Date(Date.now() - 300_000).toISOString(), commitPercent: 99 }));
+  const stale = LaunchDesk.fromEnv({ ...env, T3_LAUNCH_DESK_DIR: join(dir, "d2") }, () => {});
+  assert.equal(stale.memory().status, "stale");
+  assert.equal(stale.admit(req, []).kind, "launch");
 });
 
 // ---------- events for Host Guard (F-44) ----------
