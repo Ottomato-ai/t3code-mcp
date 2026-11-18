@@ -13,25 +13,34 @@ const beat = (dir, body) => {
   return file;
 };
 
-test("a fresh heartbeat gives the commit percent; 90% or more blocks", (t) => {
+test("a fresh heartbeat gives the commit percent and the block percent it used", (t) => {
   const dir = tempDir(t);
   const file = beat(dir, { at: new Date(T0 - 5000).toISOString(), commitPercent: 91.2, pressure: "block" });
-  const m = readHostGuardMemory({ file, nowMs: T0 });
+  const m = readHostGuardMemory({ file, nowMs: T0, blockPercent: 85 });
   assert.equal(m.status, "ok");
   assert.equal(m.commitPercent, 91.2);
+  assert.equal(m.blockPercent, 85);
   assert.equal(m.blocks, true);
 });
 
-test("exactly 90% blocks, 89.9% does not", (t) => {
+test("block percent 85: 84.9% does not block, exactly 85% blocks", (t) => {
   const dir = tempDir(t);
   const at = new Date(T0).toISOString();
-  assert.equal(readHostGuardMemory({ file: beat(dir, { at, commitPercent: 90 }), nowMs: T0 }).blocks, true);
-  assert.equal(readHostGuardMemory({ file: beat(dir, { at, commitPercent: 89.9 }), nowMs: T0 }).blocks, false);
+  assert.equal(readHostGuardMemory({ file: beat(dir, { at, commitPercent: 84.9 }), nowMs: T0, blockPercent: 85 }).blocks, false);
+  assert.equal(readHostGuardMemory({ file: beat(dir, { at, commitPercent: 85 }), nowMs: T0, blockPercent: 85 }).blocks, true);
 });
 
-test("a missing file is unreadable and does not block", (t) => {
+test("block percent 90 restores the old line: 89.9% does not block, 90% blocks", (t) => {
   const dir = tempDir(t);
-  const m = readHostGuardMemory({ file: join(dir, "nope.json"), nowMs: T0 });
+  const at = new Date(T0).toISOString();
+  assert.equal(readHostGuardMemory({ file: beat(dir, { at, commitPercent: 89.9 }), nowMs: T0, blockPercent: 90 }).blocks, false);
+  assert.equal(readHostGuardMemory({ file: beat(dir, { at, commitPercent: 87 }), nowMs: T0, blockPercent: 90 }).blocks, false);
+  assert.equal(readHostGuardMemory({ file: beat(dir, { at, commitPercent: 90 }), nowMs: T0, blockPercent: 90 }).blocks, true);
+});
+
+test("a missing file is unreadable and does not block, even at the lowest block percent", (t) => {
+  const dir = tempDir(t);
+  const m = readHostGuardMemory({ file: join(dir, "nope.json"), nowMs: T0, blockPercent: 50 });
   assert.equal(m.status, "unreadable");
   assert.equal(m.commitPercent, null);
   assert.equal(m.blocks, false);
@@ -41,27 +50,28 @@ test("a missing file is unreadable and does not block", (t) => {
 test("invalid JSON or no commit number is unreadable and does not block", (t) => {
   const dir = tempDir(t);
   for (const body of ["{oops", { at: new Date(T0).toISOString() }, { at: new Date(T0).toISOString(), commitPercent: "95" }]) {
-    const m = readHostGuardMemory({ file: beat(dir, body), nowMs: T0 });
+    const m = readHostGuardMemory({ file: beat(dir, body), nowMs: T0, blockPercent: 50 });
     assert.equal(m.status, "unreadable", JSON.stringify(body));
     assert.equal(m.blocks, false);
   }
 });
 
-test("a heartbeat older than 2 minutes is stale and does not block", (t) => {
+test("a heartbeat older than 2 minutes is stale and does not block, even at the lowest block percent", (t) => {
   const dir = tempDir(t);
   const file = beat(dir, { at: new Date(T0 - 120_000).toISOString(), commitPercent: 95 });
-  const m = readHostGuardMemory({ file, nowMs: T0 });
+  const m = readHostGuardMemory({ file, nowMs: T0, blockPercent: 50 });
   assert.equal(m.status, "stale");
+  assert.equal(m.blockPercent, 50);
   assert.equal(m.commitPercent, 95);
   assert.equal(m.blocks, false);
-  const fresh = readHostGuardMemory({ file, nowMs: T0 - 1 });
+  const fresh = readHostGuardMemory({ file, nowMs: T0 - 1, blockPercent: 50 });
   assert.equal(fresh.status, "ok");
   assert.equal(fresh.blocks, true);
 });
 
 test("a heartbeat with no valid time is unreadable", (t) => {
   const dir = tempDir(t);
-  const m = readHostGuardMemory({ file: beat(dir, { at: "never", commitPercent: 95 }), nowMs: T0 });
+  const m = readHostGuardMemory({ file: beat(dir, { at: "never", commitPercent: 95 }), nowMs: T0, blockPercent: 50 });
   assert.equal(m.status, "unreadable");
   assert.equal(m.blocks, false);
 });

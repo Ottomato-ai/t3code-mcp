@@ -73,11 +73,18 @@ export function queuedResult(admission: Extract<Admission, { kind: "queued" }>, 
     position: admission.position,
     running: admission.running,
     cap: admission.cap,
-    memory: { status: admission.memory.status, commitPercent: admission.memory.commitPercent },
+    memory: {
+      status: admission.memory.status,
+      commitPercent: admission.memory.commitPercent,
+      blockPercent: admission.memory.blockPercent,
+    },
     note:
       "Not launched: the launch cap is reached, host memory is high, or lanes wait ahead. " +
       "Do not retry in a loop. Call launch_wait with this queue_entry (or check back on your " +
-      `watcher), then call ${tool} again with the same lane and queue_entry once granted.`,
+      `watcher), then call ${tool} again with the same lane and queue_entry once granted.` +
+      (admission.memory.blocks
+        ? ` Host memory: commit ${admission.memory.commitPercent}% is at or above the ${admission.memory.blockPercent}% launch line.`
+        : ""),
   });
 }
 
@@ -173,7 +180,12 @@ export function registerLaunchDesk(server: McpServer, getClient: () => T3Client,
               }
             : null,
           free: v.free,
-          memory: { status: v.memory.status, commitPercent: v.memory.commitPercent, blocks: v.memory.blocks },
+          memory: {
+            status: v.memory.status,
+            commitPercent: v.memory.commitPercent,
+            blockPercent: v.memory.blockPercent,
+            blocks: v.memory.blocks,
+          },
           grants: v.grants.map((e) => ({ ...row(e), state: e.state, grant_expires_at: e.grant_expires_at })),
           waiting: v.waiting.map(({ entry, position }) => ({ position, ...row(entry) })),
           note: UNTRUSTED_NOTE,

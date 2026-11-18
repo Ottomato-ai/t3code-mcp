@@ -2,13 +2,14 @@
 // hostguard MCP (hostguard_status / hostguard_pressure) reads. Read-only.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { MEMORY_BLOCK_PERCENT } from "./store.js";
 
 export interface MemoryReading {
   /** ok: fresh heartbeat; stale: heartbeat too old; unreadable: missing or invalid. */
   status: "ok" | "stale" | "unreadable";
   commitPercent: number | null;
-  /** True only for a fresh heartbeat at or above the block percent. */
+  /** The block percent this reading was judged against (T3_LAUNCH_MEMORY_BLOCK_PERCENT). */
+  blockPercent: number;
+  /** True only for a fresh heartbeat at or above blockPercent. */
   blocks: boolean;
   detail: string | null;
 }
@@ -23,27 +24,30 @@ export function defaultHostGuardFile(env: NodeJS.ProcessEnv = process.env): stri
   return join(home, "heartbeat.json");
 }
 
-export function readHostGuardMemory(opts: { file?: string; nowMs?: number } = {}): MemoryReading {
+/** blockPercent comes from the desk (LaunchDesk.memoryBlockPercent); there is no default here. */
+export function readHostGuardMemory(opts: { file?: string; nowMs?: number; blockPercent: number }): MemoryReading {
   const file = opts.file ?? defaultHostGuardFile();
   const nowMs = opts.nowMs ?? Date.now();
+  const blockPercent = opts.blockPercent;
   let hb: { at?: unknown; commitPercent?: unknown };
   try {
     hb = JSON.parse(readFileSync(file, "utf8"));
   } catch (e) {
-    return { status: "unreadable", commitPercent: null, blocks: false, detail: `${file}: ${(e as Error).message}` };
+    return { status: "unreadable", commitPercent: null, blockPercent, blocks: false, detail: `${file}: ${(e as Error).message}` };
   }
   const at = typeof hb.at === "string" ? Date.parse(hb.at) : NaN;
   if (typeof hb.commitPercent !== "number" || !Number.isFinite(hb.commitPercent) || !Number.isFinite(at)) {
-    return { status: "unreadable", commitPercent: null, blocks: false, detail: `${file}: no commitPercent or time` };
+    return { status: "unreadable", commitPercent: null, blockPercent, blocks: false, detail: `${file}: no commitPercent or time` };
   }
   const commitPercent = hb.commitPercent;
   if (nowMs - at >= HEARTBEAT_STALE_MS) {
     return {
       status: "stale",
       commitPercent,
+      blockPercent,
       blocks: false,
       detail: `host-guard heartbeat is ${Math.round((nowMs - at) / 1000)} s old`,
     };
   }
-  return { status: "ok", commitPercent, blocks: commitPercent >= MEMORY_BLOCK_PERCENT, detail: null };
+  return { status: "ok", commitPercent, blockPercent, blocks: commitPercent >= blockPercent, detail: null };
 }
