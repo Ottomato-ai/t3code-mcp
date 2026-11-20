@@ -1002,3 +1002,32 @@ test("launch_queue free uses the effective cap", async (t) => {
   const q = await call("launch_queue", {});
   assert.equal(q.free, 17);
 });
+
+// ---------- 2026-11-20: a fresh Host Guard record can lower the cap below T3_LAUNCH_CAP ----------
+
+test("cap 12 from env, 10 running, fresh record 10/10: a create is queued, not launched", async (t) => {
+  const running = Array.from({ length: 10 }, (_, i) => `r${i}`);
+  const s = await setup(t, { cap: 12, running, headroom: room({ baseCap: 10, hardCap: 10, live: 10, allowedExtra: 0 }) });
+  const r = await s.call("create_thread", create("Lane A"));
+  assert.equal(r.queued, true);
+  assert.equal(r.cap, 10);
+  assert.equal(creates(s.t3).length, 0);
+  assert.equal(s.t3.state.dispatched.length, 0);
+  const q = await s.call("launch_queue", {});
+  assert.deepEqual([q.cap, q.cap_base, q.cap_extra, q.cap_reason], [10, 10, 0, "base"]);
+  const caps = capEvents(s.dir);
+  assert.equal(caps.length, 1);
+  assert.deepEqual(
+    { effective: caps[0].effective, base: caps[0].base, reason: caps[0].reason, floor: caps[0].floor, below_floor: caps[0].below_floor },
+    { effective: 10, base: 10, reason: "base", floor: 12, below_floor: true },
+  );
+});
+
+test("the same record gone stale: the cap is the env value again and the event has no below_floor", async (t) => {
+  const running = Array.from({ length: 10 }, (_, i) => `r${i}`);
+  const s = await setup(t, { cap: 12, running, headroom: room({ status: "stale", baseCap: 10, hardCap: 10, live: 10, allowedExtra: 0 }) });
+  const r = await s.call("create_thread", create("Lane A"));
+  assert.equal(r.created, true);
+  const caps = capEvents(s.dir);
+  assert.deepEqual([caps[0].effective, caps[0].reason, "below_floor" in caps[0], "floor" in caps[0]], [12, "stale", false, false]);
+});

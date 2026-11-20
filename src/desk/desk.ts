@@ -213,7 +213,9 @@ export class LaunchDesk {
   private logCap(cap: { decision: CapDecision; changed: boolean }): void {
     if (!cap.changed) return;
     const d = cap.decision;
-    this.store.logEvent({ type: "cap", effective: d.effective, base: d.base, extra: d.extra, reason: d.reason });
+    // A fresh Host Guard record may set the cap under T3_LAUNCH_CAP: say so, with the floor it went under.
+    const below = d.effective < this.cap ? { floor: this.cap, below_floor: true } : {};
+    this.store.logEvent({ type: "cap", effective: d.effective, base: d.base, extra: d.extra, reason: d.reason, ...below });
   }
 
   /**
