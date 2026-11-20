@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// GHSA-mrhx-c7xc-m3w5 (zod < 4.6.6), high.
+// GHSA-mrhx-c7xc-m3w5 (zod < 4.6.6) and GHSA-27r3-jxmh-p828 (body-parser 2.x < 2.4.0), both high.
 // The MCP SDK parses every JSON-RPC message with "zod/v4", so the copy the SDK resolves matters too.
 
 /** Version of the package `name` as Node resolves `specifier` (default `name`) from the file `fromFile`. */
@@ -42,6 +42,13 @@ test("zod the MCP SDK imports is 4.6.6 or later", () => {
   const sdk = resolvedVersion("@modelcontextprotocol/sdk", here, SDK_ENTRY);
   const { version } = resolvedVersion("zod", sdk.file);
   assert.ok(atLeast(version, "4.6.6"), `SDK resolves zod ${version}`);
+});
+
+test("body-parser under the SDK's express is 2.4.0 or later", () => {
+  const sdk = resolvedVersion("@modelcontextprotocol/sdk", here, SDK_ENTRY);
+  const express = resolvedVersion("express", sdk.file);
+  const { version } = resolvedVersion("body-parser", express.file);
+  assert.ok(atLeast(version, "2.4.0"), `body-parser ${version} is below 2.4.0`);
 });
 
 // The fixed behaviour: a size bound rejects an oversized array before its elements are walked,
