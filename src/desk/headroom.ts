@@ -91,28 +91,35 @@ export function readHeadroom(opts: { file?: string; nowMs?: number } = {}): Head
   return reading;
 }
 
+/** A cap from the record counts only as a whole number of 1 or more (no zero cap from a damaged record). */
+const capValue = (n: number | null): number | null => (n !== null && Number.isInteger(n) && n >= 1 ? n : null);
+
 /**
- * Host Guard formula: effective cap = max(baseCap, live) + allowedExtra, at most hardCap, always
- * within [floor, 20] (floor: T3_LAUNCH_CAP, 15 by default). allowedExtra is how many more
- * agents fit now and live is the record's t3.live, from the same snapshot. allowedExtra 0
- * means no extra grant, even when more than the base cap run. No extra when the record is stale, unreadable or of
- * an unknown schema, while Host Guard measures a launch, or until a record newer than the
- * last extra launch has arrived.
+ * Host Guard formula: effective cap = max(baseCap, live) + allowedExtra, at most hardCap and
+ * the ceiling max(20, floor) (floor: T3_LAUNCH_CAP, 15 by default). allowedExtra is how many more
+ * agents fit now and live is the record's t3.live, from the same snapshot.
+ *
+ * A fresh record is authoritative (2026-11-20): its baseCap is the base even below the floor,
+ * and its hardCap bounds every branch (base, measuring, pending-measurement, extra), so Host
+ * Guard can lower the cap. A baseCap or hardCap that is not a whole number of 1 or more is
+ * ignored: the base is then the floor. A stale, unreadable or unknown-schema record gives the
+ * floor. allowedExtra 0 means no extra grant, even when more than the base cap run. No extra
+ * while Host Guard measures a launch, or until a record newer than the last extra launch has arrived.
  */
 export function decideCap(input: { floor: number; reading: HeadroomReading; lastExtraAt: number | null }): CapDecision {
   const { floor, reading } = input;
   const ceiling = Math.max(HARD_CAP_MAX, floor);
-  const clamp = (n: number) => Math.min(Math.max(n, floor), ceiling);
   const flat = (base: number, reason: CapReason): CapDecision => ({ effective: base, base, extra: 0, reason, extraGrants: 0 });
   if (reading.status !== "ok") return flat(floor, reading.status);
-  const base = clamp(reading.baseCap ?? floor);
+  const top = Math.min(capValue(reading.hardCap) ?? ceiling, ceiling);
+  const base = Math.min(capValue(reading.baseCap) ?? floor, top);
   if (reading.measuring !== null) return flat(base, "measuring");
   if (input.lastExtraAt !== null && !(reading.at !== null && reading.at > input.lastExtraAt)) {
     return flat(base, "pending-measurement");
   }
   const allowed = Math.max(0, Math.floor(reading.allowedExtra));
   if (allowed === 0) return flat(base, "base");
-  const effective = clamp(Math.min(Math.max(base, reading.live ?? 0) + allowed, reading.hardCap ?? ceiling));
+  const effective = Math.min(Math.max(base, reading.live ?? 0) + allowed, top);
   const extra = effective - base;
   return extra > 0
     ? { effective, base, extra, reason: "extra", extraGrants: 1 }
