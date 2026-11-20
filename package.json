@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs && node --test test/headroom.test.mjs && node --test test/effort.test.mjs && node --test test/v2-map.test.mjs && node --test test/v2-commands.test.mjs && node --test test/v2-client.test.mjs && node --test test/v2-tools.test.mjs && node --test test/v2-queue-map.test.mjs && node --test test/queue-tools.test.mjs && node --test test/node-pin.test.mjs",
+    "test": "tsc && node --test test/store.test.mjs && node --test test/memory.test.mjs && node --test test/desk-tools.test.mjs && node --test test/client.test.mjs && node --test test/headroom.test.mjs && node --test test/effort.test.mjs && node --test test/v2-map.test.mjs && node --test test/v2-commands.test.mjs && node --test test/v2-client.test.mjs && node --test test/v2-tools.test.mjs && node --test test/v2-queue-map.test.mjs && node --test test/queue-tools.test.mjs && node --test test/node-pin.test.mjs && node --test test/deps-audit.test.mjs",
     "smoke": "node scripts/smoke.mjs"
   },
   "engines": {
@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "zod": "^3.25.76"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",

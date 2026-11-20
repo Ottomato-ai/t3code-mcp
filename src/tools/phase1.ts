@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { wasNotSent, type T3Client } from "../client.js";
 import { attentionOf, pendingRequests } from "../model.js";
 import { commands } from "../v2.js";

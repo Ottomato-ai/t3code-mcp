@@ -2,7 +2,7 @@
 // turn. Commands as the T3 web client sends them (queued-run.cancel, queued-run.edit); the
 // order and the text as the T3 server reads them (see queuedMessagesFromV2).
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { wasNotSent, type T3Client } from "../client.js";
 import { errorResult, jsonResult, relTime } from "../format.js";
 import type { ThreadShell } from "../model.js";
